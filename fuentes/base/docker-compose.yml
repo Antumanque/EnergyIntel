@@ -1,0 +1,64 @@
+services:
+  # MariaDB database service (for local development)
+  api_db:
+    image: mariadb:10.11
+    container_name: api_ingestion_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-api_ingestion}
+      MYSQL_USER: ${DB_USER:-api_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-api_password}
+    volumes:
+      # Persistent data storage
+      - ./db/data:/var/lib/mysql
+      # Initialization scripts
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    networks:
+      - api_network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Python application service
+  api_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api_ingestion_app
+    depends_on:
+      api_db:
+        condition: service_healthy
+    environment:
+      # Database connection
+      DB_HOST: ${DB_HOST:-api_db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-api_user}
+      DB_PASSWORD: ${DB_PASSWORD:-api_password}
+      DB_NAME: ${DB_NAME:-api_ingestion}
+
+      # API configuration (numbered list: API_URL_1, API_URL_2, etc.)
+      API_URL_1: ${API_URL_1:-}
+      API_URL_2: ${API_URL_2:-}
+      API_URL_3: ${API_URL_3:-}
+      API_URL_4: ${API_URL_4:-}
+      API_URL_5: ${API_URL_5:-}
+
+      # HTTP client configuration
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+    networks:
+      - api_network
+    profiles:
+      # This service runs on-demand, not with 'docker-compose up'
+      # Use: docker-compose run --rm api_app
+      - manual
+
+networks:
+  api_network:
+    driver: bridge

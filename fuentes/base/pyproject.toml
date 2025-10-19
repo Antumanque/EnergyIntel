@@ -1,0 +1,11 @@
+[project]
+name = "api-data-ingestion-template"
+version = "0.1.0"
+description = "A reusable Python template for REST API data ingestion with raw data storage in MariaDB"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "mysql-connector-python>=9.4.0",
+    "pydantic-settings>=2.0",
+]
