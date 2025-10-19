@@ -1,0 +1,64 @@
+services:
+  # MariaDB database service (for local development)
+  cen_db:
+    image: mariadb:10.11
+    container_name: cen_acceso_abierto_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-cen_acceso_abierto}
+      MYSQL_USER: ${DB_USER:-cen_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-cen_password}
+    volumes:
+      # Persistent data storage
+      - ./db/data:/var/lib/mysql
+      # Initialization scripts
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    networks:
+      - cen_network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Python application service
+  cen_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cen_acceso_abierto_app
+    depends_on:
+      cen_db:
+        condition: service_healthy
+    environment:
+      # Database connection
+      DB_HOST: ${DB_HOST:-cen_db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-cen_user}
+      DB_PASSWORD: ${DB_PASSWORD:-cen_password}
+      DB_NAME: ${DB_NAME:-cen_acceso_abierto}
+
+      # API configuration (numbered list: API_URL_1, API_URL_2, etc.)
+      API_URL_1: ${API_URL_1:-}
+      API_URL_2: ${API_URL_2:-}
+      API_URL_3: ${API_URL_3:-}
+      API_URL_4: ${API_URL_4:-}
+      API_URL_5: ${API_URL_5:-}
+
+      # HTTP client configuration
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+    networks:
+      - cen_network
+    profiles:
+      # This service runs on-demand, not with 'docker-compose up'
+      # Use: docker-compose run --rm cen_app
+      - manual
+
+networks:
+  cen_network:
+    driver: bridge

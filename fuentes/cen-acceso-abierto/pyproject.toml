@@ -1,0 +1,11 @@
+[project]
+name = "cen-acceso-abierto"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "mysql-connector-python>=9.4.0",
+    "pydantic-settings>=2.0",
+]
