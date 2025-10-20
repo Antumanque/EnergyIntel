@@ -38,7 +38,35 @@ class Settings(BaseSettings):
         default="cen_acceso_abierto", description="Database name"
     )
 
-    # API configuration
+    # CEN API configuration (nueva configuración)
+    cen_api_base_url: str = Field(
+        default="https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public",
+        description="Base URL for CEN Public API",
+    )
+    cen_years: str = Field(
+        default="2025",
+        description="Years to fetch data for (comma-separated in .env)",
+    )
+    cen_document_types: str = Field(
+        default="Formulario SUCTD,Formulario SAC,Formulario_proyecto_fehaciente",
+        description="Document types to extract (exact strings from API)",
+    )
+
+    @property
+    def cen_years_list(self) -> List[int]:
+        """Parse cen_years string to list of ints."""
+        if isinstance(self.cen_years, str):
+            return [int(y.strip()) for y in self.cen_years.split(',') if y.strip()]
+        return [2025]
+
+    @property
+    def cen_document_types_list(self) -> List[str]:
+        """Parse cen_document_types string to list of strings."""
+        if isinstance(self.cen_document_types, str):
+            return [d.strip() for d in self.cen_document_types.split(',') if d.strip()]
+        return ["Formulario SUCTD", "Formulario SAC", "Formulario_proyecto_fehaciente"]
+
+    # API configuration (legacy, keep for backward compatibility)
     api_urls: List[str] = Field(
         default_factory=list,
         description="List of API URLs to fetch (use API_URL_1, API_URL_2, etc.)",

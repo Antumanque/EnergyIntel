@@ -27,5 +27,6 @@ RUN useradd -m -u 1000 appuser && \
 
 USER appuser
 
-# Default command runs the main application
-CMD ["python", "-m", "src.main"]
+# Default command runs the CEN extraction (main_cen.py)
+# For generic API extraction, override with: docker run <image> python -m src.main
+CMD ["python", "-m", "src.main_cen"]

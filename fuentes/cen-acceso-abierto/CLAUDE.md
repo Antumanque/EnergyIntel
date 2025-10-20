@@ -382,3 +382,124 @@ docker-compose run --rm cen_app python -c "from src.settings import get_settings
 - **Philosophy**: Prefer clarity over cleverness
 - **Retry strategy**: Exponential backoff (2, 4, 8 seconds)
 - **Data storage**: Raw, unmodified responses (transformation happens later)
+
+---
+
+## 🆕 NEW: Sistema de Extracción de Solicitudes y Documentos (2025)
+
+### Overview
+
+Se ha agregado un **nuevo sistema completo** para extraer solicitudes de conexión eléctrica y sus documentos asociados desde la API del CEN.
+
+### Nuevos Módulos
+
+#### 1. **`src/main_cen.py`** - Script principal de extracción
+   - Orquesta la extracción completa de solicitudes y documentos
+   - **Paso 1**: Extrae solicitudes por año (tipo=6 de la API)
+   - **Paso 2**: Para cada solicitud, extrae sus documentos (tipo=11)
+   - **Paso 3**: Filtra y guarda solo documentos importantes
+   - Implementa estrategia **append-only** (nunca actualiza ni borra)
+
+#### 2. **`src/cen_database.py`** - Gestor de BD para solicitudes/documentos
+   - Maneja tablas `solicitudes` y `documentos`
+   - Funciones helper para parsear fechas ISO 8601 a MySQL
+   - Métodos bulk insert con deduplicación automática
+   - Estadísticas y queries útiles
+
+#### 3. **`src/cen_extractor.py`** - Extractor de la API del CEN
+   - Construye URLs dinámicamente con parámetros
+   - Extrae solicitudes por año
+   - Extrae documentos por solicitud_id
+   - Filtra documentos por tipo (SUCTD, SAC, Formulario_proyecto_fehaciente)
+
+### Nuevas Tablas en la Base de Datos
+
+#### `solicitudes`
+Almacena información completa de cada solicitud de conexión eléctrica:
+- Datos del proyecto (nombre, potencia, tecnología)
+- Empresa solicitante (RUT, razón social)
+- Ubicación (región, comuna, lat/lng)
+- Estado y etapa del proceso
+- Información de conexión (subestación, tensión, fecha estimada)
+
+**Fuente**: API endpoint `tipo=6&anio={year}`
+
+#### `documentos`
+Almacena metadata de documentos adjuntos a cada solicitud:
+- Nombre del archivo y ruta en S3
+- Tipo de documento (Formulario SUCTD, SAC, etc.)
+- Fechas de creación/actualización
+- Flags de visibilidad y descarga
+- Relación con `solicitudes` via `solicitud_id` (FK)
+
+**Fuente**: API endpoint `tipo=11&solicitud_id={id}`
+
+#### Vistas Útiles
+- `documentos_importantes`: Filtra solo SUCTD, SAC y Formulario_proyecto_fehaciente
+- `solicitudes_con_documentos`: Solicitudes con conteo de documentos
+- `estadisticas_extraccion`: Dashboard de estadísticas generales
+
+### Documentación Completa
+
+Ver documentación detallada en:
+- **`docs/API_DOCUMENTATION.md`**: Documentación completa de todos los endpoints de la API del CEN (tipos 0-11)
+- **`docs/DATABASE_SCHEMA.md`**: Schema de BD, relaciones, orden de llenado, y queries útiles
+
+### Ejecución
+
+```bash
+# Local (con base de datos en Docker)
+DB_HOST=localhost uv run python -m src.main_cen
+
+# Docker
+docker-compose run --rm cen_app python -m src.main_cen
+```
+
+### Configuración (.env)
+
+```env
+# Años a extraer (separados por coma)
+CEN_YEARS=2025  # Para desarrollo
+# CEN_YEARS=2020,2021,2022,2023,2024,2025  # Para producción
+
+# Tipos de documentos a extraer
+CEN_DOCUMENT_TYPES=Formulario SUCTD,Formulario SAC,Formulario_proyecto_fehaciente
+```
+
+### Datos Extraídos (Ejemplo: 2025)
+
+- **2,448 solicitudes** de conexión eléctrica
+  - 1,584 SASC (Solicitudes de Acceso y Conexión)
+  - 631 SUCT (Uso de Capacidad de Transporte Dedicada)
+  - 233 FEHACIENTES (Proyectos Fehacientes)
+- **2,290 documentos** importantes
+  - 655 Formularios SUCTD
+  - 1,635 Formularios SAC
+  - 0 Proyectos Fehacientes (no hay en 2025)
+
+**Tiempo de extracción**: ~22 minutos (incluye 2,448 llamadas a la API)
+
+### Estrategia Append-Only
+
+El sistema **NUNCA** actualiza ni elimina registros:
+- ✅ Solo **inserta** nuevos registros
+- ✅ Seguro ejecutar múltiples veces (deduplicación automática)
+- ✅ Preserva historial completo para auditoría
+- ✅ Idempotente
+
+### Próximos Pasos Sugeridos
+
+1. **Descargar archivos**: Usar `documentos.ruta_s3` para descargar PDFs/XLSX
+2. **Parsear PDFs**: Extraer datos estructurados de Formularios SUCTD/SAC
+3. **Ampliar cobertura**: Procesar años 2020-2024
+4. **Automatización**: Configurar cron para ejecución periódica
+
+### Relación con Sistema Anterior
+
+El sistema anterior (`src/main.py`) extrae datos del endpoint `/interesados` que lista empresas stakeholders de cada solicitud. Este se relaciona con el nuevo sistema via `solicitud_id`:
+
+```
+interesados.solicitud_id → solicitudes.id (many-to-one)
+```
+
+Ambos sistemas pueden coexistir y se complementan.

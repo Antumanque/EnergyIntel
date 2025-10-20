@@ -42,7 +42,12 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-cen_password}
       DB_NAME: ${DB_NAME:-cen_acceso_abierto}
 
-      # API configuration (numbered list: API_URL_1, API_URL_2, etc.)
+      # CEN API configuration (new)
+      CEN_API_BASE_URL: ${CEN_API_BASE_URL:-https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public}
+      CEN_YEARS: ${CEN_YEARS:-2025}
+      CEN_DOCUMENT_TYPES: ${CEN_DOCUMENT_TYPES:-Formulario SUCTD,Formulario SAC,Proyecto Fehaciente}
+
+      # API configuration (numbered list: API_URL_1, API_URL_2, etc.) - legacy
       API_URL_1: ${API_URL_1:-}
       API_URL_2: ${API_URL_2:-}
       API_URL_3: ${API_URL_3:-}
