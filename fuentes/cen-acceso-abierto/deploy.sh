@@ -136,15 +136,15 @@ log_info "Paso 3/4: Configurando base de datos..."
 # Forzar fresh install si se especificó --fresh
 if [ "$FORCE_FRESH" = true ]; then
     log_warn "Forzando FRESH INSTALL completo (--fresh)"
-    log_warn "⚠️  ADVERTENCIA: Esto recreará TODAS las tablas"
-    read -p "¿Estás seguro? Esto BORRARÁ todos los datos existentes (y/N): " -n 1 -r
+    log_warn "⚠️  ADVERTENCIA: Esto BORRARÁ y recreará TODAS las tablas"
+    read -p "¿Estás seguro? Esto eliminará TODOS los datos existentes (y/N): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_error "Deployment cancelado"
         exit 1
     fi
 
-    uv run python db/setup.py --fresh
+    uv run python db/setup.py --fresh --drop
 else
     # Auto-setup: detecta si es fresh install o solo migraciones
     uv run python db/setup.py

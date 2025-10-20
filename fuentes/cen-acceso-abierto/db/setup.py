@@ -139,7 +139,7 @@ class DatabaseSetup:
             logger.error(f"❌ Error ejecutando {sql_file.name}: {e}", exc_info=True)
             return False
 
-    def fresh_install(self) -> bool:
+    def fresh_install(self, drop_existing: bool = False) -> bool:
         """
         Ejecuta setup completo desde cero.
 
@@ -148,6 +148,9 @@ class DatabaseSetup:
         2. schema_solicitudes.sql (solicitudes, documentos)
         3. schema_formularios_parsed.sql (formularios parseados)
 
+        Args:
+            drop_existing: Si True, borra tablas existentes antes de crearlas
+
         Returns:
             True si fue exitoso
         """
@@ -155,6 +158,49 @@ class DatabaseSetup:
 
         try:
             conn = self._get_connection()
+
+            # Si se solicita, borrar tablas existentes primero
+            if drop_existing:
+                logger.warning("⚠️  BORRANDO TABLAS EXISTENTES")
+                cursor = conn.cursor()
+
+                # Orden inverso para respetar foreign keys
+                tables_to_drop = [
+                    'formularios_suctd_parsed',
+                    'formularios_fehaciente_parsed',
+                    'formularios_sac_parsed',
+                    'formularios_parseados',
+                    'documentos',
+                    'solicitudes',
+                    'interesados',
+                    'raw_api_data',
+                    'schema_migrations'
+                ]
+
+                for table in tables_to_drop:
+                    try:
+                        cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                        logger.info(f"  🗑️  Borrada tabla: {table}")
+                    except Error as e:
+                        logger.warning(f"  ⚠️  No se pudo borrar {table}: {e}")
+
+                # También borrar vistas
+                views_to_drop = [
+                    'documentos_listos_para_parsear',
+                    'documentos_ultimas_versiones',
+                    'successful_fetches',
+                    'latest_fetches'
+                ]
+
+                for view in views_to_drop:
+                    try:
+                        cursor.execute(f"DROP VIEW IF EXISTS {view}")
+                        logger.info(f"  🗑️  Borrada vista: {view}")
+                    except Error as e:
+                        logger.warning(f"  ⚠️  No se pudo borrar vista {view}: {e}")
+
+                conn.commit()
+                logger.info("✅ Tablas y vistas existentes eliminadas")
 
             # Archivos de schema en orden
             schema_files = [
@@ -254,6 +300,12 @@ def main():
     )
 
     parser.add_argument(
+        "--drop",
+        action="store_true",
+        help="Borrar tablas existentes antes de fresh install (usar con --fresh)"
+    )
+
+    parser.add_argument(
         "--migrate",
         action="store_true",
         help="Solo ejecutar migraciones (no fresh install)"
@@ -265,7 +317,7 @@ def main():
 
     if args.fresh:
         logger.info("🔨 Modo: FRESH INSTALL (forzado)")
-        success = setup.fresh_install()
+        success = setup.fresh_install(drop_existing=args.drop)
     elif args.migrate:
         logger.info("🔨 Modo: SOLO MIGRACIONES (forzado)")
         success = setup.run_migrations()
