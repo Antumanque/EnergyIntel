@@ -113,57 +113,6 @@ class CENDatabaseManager:
             logger.error(f"❌ Error al conectar a la base de datos: {e}")
             return False
 
-    def create_tables(self) -> None:
-        """
-        Crea las tablas solicitudes y documentos si no existen.
-
-        Lee el schema desde db/schema_solicitudes.sql y lo ejecuta.
-        """
-        try:
-            # Leer el archivo SQL
-            with open("db/schema_solicitudes.sql", "r", encoding="utf-8") as f:
-                schema_sql = f.read()
-
-            with self.connection() as conn:
-                cursor = conn.cursor()
-
-                # Ejecutar cada statement del schema
-                # Separar por punto y coma, pero ignorar líneas vacías y comentarios
-                statements = []
-                current_statement = []
-
-                for line in schema_sql.split("\n"):
-                    # Ignorar comentarios y líneas vacías
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("--"):
-                        continue
-
-                    current_statement.append(line)
-
-                    # Si la línea termina con ; es el fin del statement
-                    if stripped.endswith(";"):
-                        statements.append("\n".join(current_statement))
-                        current_statement = []
-
-                # Ejecutar cada statement
-                for statement in statements:
-                    if statement.strip():
-                        try:
-                            cursor.execute(statement)
-                        except Error as e:
-                            # Ignorar errores de "table already exists" para CREATE TABLE
-                            if "already exists" not in str(e).lower():
-                                logger.warning(f"Advertencia al ejecutar statement: {e}")
-
-                conn.commit()
-                logger.info("✅ Tablas creadas/verificadas exitosamente")
-
-        except FileNotFoundError:
-            logger.error("❌ No se encontró el archivo db/schema_solicitudes.sql")
-            raise
-        except Error as e:
-            logger.error(f"❌ Error al crear tablas: {e}", exc_info=True)
-            raise
 
     def get_existing_solicitud_ids(self) -> set[int]:
         """

@@ -85,6 +85,7 @@ src/
    - **`cen.py`**: CENDatabaseManager for `solicitudes` and `documentos` tables
    - Connection management with context managers
    - Bulk insert operations with append-only strategy
+   - **NOTE**: Database tables are created via `deploy.sh` using SQL schema files, NOT by repository methods
 
 5. **`src/http_client.py`** - HTTP Operations
    - Retry logic with exponential backoff
@@ -100,17 +101,26 @@ src/
 
 ### Database Schema
 
-**Table: `raw_api_data`**
-- `id` (BIGINT, PK) - Auto-incrementing primary key
-- `source_url` (VARCHAR) - The URL that was fetched
-- `fetched_at` (TIMESTAMP) - When the data was fetched
-- `status_code` (INT) - HTTP status code
-- `data` (JSON) - Raw response data as JSON
-- `error_message` (TEXT) - Error message if request failed
+**Schema Management Strategy:**
+- Database tables are defined in SQL files: `db/init.sql`, `db/schema_solicitudes.sql`, `db/schema_formularios_parsed.sql`
+- Tables are created during deployment via `deploy.sh` → `db/setup.py`
+- Extractors do NOT create tables - they expect tables to already exist
+- This ensures simplicity and single source of truth for schemas
+
+**Main Tables:**
+- **`raw_api_data`**: Raw API responses (all endpoints)
+- **`interesados`**: Stakeholder information
+- **`solicitudes`**: Connection requests (projects)
+- **`documentos`**: Documents attached to solicitudes
+- **`formularios_parseados`**: Parsed form data (SAC, SUCTD, Fehaciente)
 
 **Views:**
 - `successful_fetches` - Only 2xx status codes
 - `latest_fetches` - Most recent fetch per URL
+- `documentos_listos_para_parsear` - Documents ready for parsing
+- `documentos_ultimas_versiones` - Latest version of each document
+
+See `docs/DATABASE_SCHEMA.md` for complete schema documentation.
 
 ### Naming Conventions
 
@@ -194,11 +204,37 @@ docker-compose run --rm -e CEN_YEARS="2024,2025" cen_app
 ### Production (Antumanque Server)
 - Database is external (not in Docker)
 - Override `DB_HOST` to point to production database
-- Use environment variables or `.env` for config
+- Use `./deploy.sh` for deployment (handles git pull, dependencies, migrations)
 - Schedule with system cron:
   ```bash
   0 * * * * cd /path/to/project && docker-compose run --rm cen_app
   ```
+
+### Database Setup (deploy.sh)
+
+The `deploy.sh` script handles database setup automatically:
+
+```bash
+# Auto-detect: fresh install or migrations
+./deploy.sh
+
+# Force fresh install (drops all tables, recreates from scratch)
+./deploy.sh --fresh
+
+# Only run migrations (skip code update)
+./deploy.sh --migrations
+
+# View migration status
+./deploy.sh --status
+```
+
+**How it works:**
+1. Auto-detects if database is empty → runs fresh install (executes all schema SQL files)
+2. If database exists → runs pending migrations only
+3. Fresh install reads from: `db/init.sql`, `db/schema_solicitudes.sql`, `db/schema_formularios_parsed.sql`
+4. Migrations run from: `db/migrations/*.sql` (tracked in `schema_migrations` table)
+
+**Important:** Extractors expect tables to already exist. Always run `deploy.sh` before running extractors.
 
 ## Code Patterns and Best Practices
 

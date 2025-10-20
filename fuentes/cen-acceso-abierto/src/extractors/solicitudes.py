@@ -295,10 +295,6 @@ class SolicitudesExtractor:
                 logger.error("❌ No se pudo conectar a la base de datos. Abortando.")
                 return 1
 
-            # Crear tablas si no existen
-            logger.info("\n🏗️  Creando/verificando tablas...")
-            self.db_manager.create_tables()
-
             # PASO 1: Extraer solicitudes
             logger.info("\n" + "=" * 70)
             logger.info("PASO 1: EXTRACCIÓN DE SOLICITUDES")

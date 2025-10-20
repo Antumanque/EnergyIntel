@@ -84,65 +84,6 @@ class DatabaseManager:
             # Esto permite reutilizar la conexión entre múltiples operaciones
             pass
 
-    def create_tables(self) -> None:
-        """
-        Crea las tablas de base de datos necesarias si no existen.
-
-        Este método es idempotente - puede ser llamado múltiples veces de forma segura.
-        Crea tanto raw_api_data como tablas normalizadas (ej: interesados).
-        """
-        # Tabla de datos raw
-        create_raw_table_sql = """
-        CREATE TABLE IF NOT EXISTS raw_api_data (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            source_url VARCHAR(512) NOT NULL,
-            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status_code INT,
-            data JSON,
-            error_message TEXT,
-            INDEX idx_source_url (source_url),
-            INDEX idx_fetched_at (fetched_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """
-
-        # Tabla normalizada de interesados
-        # NOTA: Sin UNIQUE constraint - cargamos datos tal cual vienen del API
-        # El análisis de duplicados y normalización final se hará posteriormente
-        create_interesados_table_sql = """
-        CREATE TABLE IF NOT EXISTS interesados (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            solicitud_id INT NOT NULL,
-            razon_social VARCHAR(255),
-            nombre_fantasia VARCHAR(255),
-            raw_data_id BIGINT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_solicitud_id (solicitud_id),
-            INDEX idx_razon_social (razon_social),
-            INDEX idx_nombre_fantasia (nombre_fantasia),
-            INDEX idx_solicitud_razon (solicitud_id, razon_social),
-            FOREIGN KEY (raw_data_id) REFERENCES raw_api_data(id) ON DELETE SET NULL
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """
-
-        try:
-            with self.connection() as conn:
-                cursor = conn.cursor()
-
-                # Crear tabla de datos raw
-                cursor.execute(create_raw_table_sql)
-                logger.info("raw_api_data table created/verified")
-
-                # Crear tabla interesados
-                cursor.execute(create_interesados_table_sql)
-                logger.info("interesados table created/verified")
-
-                conn.commit()
-                logger.info("All database tables created/verified successfully")
-                cursor.close()
-        except MySQLError as e:
-            logger.error(f"Failed to create tables: {e}")
-            raise
 
     def insert_raw_data(
         self,

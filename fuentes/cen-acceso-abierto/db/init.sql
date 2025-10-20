@@ -1,6 +1,6 @@
 -- Database initialization script for CEN Acceso Abierto
 -- This script runs automatically when the MariaDB container first starts
--- It creates the necessary database schema for storing raw API data
+-- It creates the base tables for storing raw API data and stakeholder information
 
 -- Ensure we're using the correct database
 USE cen_acceso_abierto;
@@ -20,6 +20,25 @@ CREATE TABLE IF NOT EXISTS raw_api_data (
     INDEX idx_status_code (status_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='Stores raw API response data from CEN and other public sources';
+
+-- Create the interesados table (stakeholders for each solicitud)
+-- NOTA: Sin UNIQUE constraint - cargamos datos tal cual vienen del API
+-- El análisis de duplicados y normalización final se hará posteriormente
+CREATE TABLE IF NOT EXISTS interesados (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    solicitud_id INT NOT NULL,
+    razon_social VARCHAR(255),
+    nombre_fantasia VARCHAR(255),
+    raw_data_id BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_solicitud_id (solicitud_id),
+    INDEX idx_razon_social (razon_social),
+    INDEX idx_nombre_fantasia (nombre_fantasia),
+    INDEX idx_solicitud_razon (solicitud_id, razon_social),
+    FOREIGN KEY (raw_data_id) REFERENCES raw_api_data(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Stores stakeholder information (interesados) from CEN /interesados endpoint';
 
 -- Optional: Create a view for successful fetches only
 CREATE OR REPLACE VIEW successful_fetches AS
@@ -55,4 +74,4 @@ ORDER BY r1.fetched_at DESC;
 -- GRANT SELECT, INSERT, UPDATE ON cen_acceso_abierto.* TO 'cen_user'@'%';
 
 -- Log completion
-SELECT 'Database initialization completed successfully' AS message;
+SELECT 'Database initialization completed: raw_api_data, interesados tables created' AS message;

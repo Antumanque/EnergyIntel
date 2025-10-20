@@ -52,11 +52,7 @@ class InteresadosExtractor:
         try:
             # Asegurar que podemos conectar
             self.db_manager.get_connection()
-
-            # Crear tablas si no existen
-            self.db_manager.create_tables()
-
-            logger.info("Database setup completed successfully")
+            logger.info("Database connection verified successfully")
         except Exception as e:
             logger.error(f"Database setup failed: {e}")
             raise

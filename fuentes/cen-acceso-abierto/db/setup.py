@@ -144,7 +144,7 @@ class DatabaseSetup:
         Ejecuta setup completo desde cero.
 
         Ejecuta todos los schemas base en orden:
-        1. init.sql (raw_api_data)
+        1. init.sql (raw_api_data, interesados)
         2. schema_solicitudes.sql (solicitudes, documentos)
         3. schema_formularios_parsed.sql (formularios parseados)
 
@@ -230,6 +230,7 @@ class DatabaseSetup:
             logger.info("="*70)
             logger.info("Tablas creadas:")
             logger.info("  - raw_api_data")
+            logger.info("  - interesados")
             logger.info("  - solicitudes")
             logger.info("  - documentos")
             logger.info("  - formularios_parseados")
