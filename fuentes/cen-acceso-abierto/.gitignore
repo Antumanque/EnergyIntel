@@ -211,3 +211,5 @@ db/data/
 downloads/
 temp_*.txt
 test_*.py
+
+.claude
