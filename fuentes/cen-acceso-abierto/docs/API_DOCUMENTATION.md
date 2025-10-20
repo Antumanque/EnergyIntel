@@ -250,7 +250,7 @@ https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo={ti
 
 ---
 
-### TIPO 6: Solicitudes Completas ⭐ (ENDPOINT PRINCIPAL)
+### TIPO 6: Solicitudes Completas (ENDPOINT PRINCIPAL)
 
 **Propósito**: **Este es el endpoint más importante**. Devuelve todas las solicitudes con información completa de proyectos, ubicación, empresa solicitante, estado, etc.
 
@@ -308,7 +308,7 @@ https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo={ti
 ]
 ```
 
-**Total de registros**: 2,448 solicitudes para el año 2025
+**Total de registros**: 2,448 solicitudes para el año 2025 (a 19 de octubre 2025)
 
 **Campos principales**:
 - `id`: ID único de la solicitud (usar como `solicitud_id` en tipo=11)
@@ -455,7 +455,7 @@ https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo={ti
 
 ---
 
-### TIPO 11: Documentos de una Solicitud ⭐ (DOCUMENTOS)
+### TIPO 11: Documentos de una Solicitud (DOCUMENTOS)
 
 **Propósito**: **Segundo endpoint más importante**. Devuelve todos los documentos adjuntos a una solicitud específica, incluyendo los formularios SUCTD, SAC y Formulario_proyecto_fehaciente.
 

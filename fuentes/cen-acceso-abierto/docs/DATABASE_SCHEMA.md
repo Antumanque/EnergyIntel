@@ -412,56 +412,73 @@ PASO 1: Extracción de datos crudos
 │
 ├─→ raw_api_data (se llena SIEMPRE en cada llamada a la API)
 │
-PASO 2: Extracción de interesados (OPCIONAL, sistema legacy)
+PASO 2: Extracción de interesados
 │
 ├─→ interesados (endpoint /interesados)
 │
-PASO 3: Extracción de solicitudes (NUEVO SISTEMA)
+PASO 3: Extracción de solicitudes
 │
 ├─→ solicitudes (endpoint tipo=6, por cada año)
 │
-PASO 4: Extracción de documentos (NUEVO SISTEMA)
+PASO 4: Extracción de documentos
 │
 └─→ documentos (endpoint tipo=11, por cada solicitud_id)
 ```
 
-### Script 1: `src/main.py` (Sistema Legacy)
+### Script Único: `src/main.py` - Orquestador de Extractores
+
+**Base URL**: `https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public`
 
 **Qué hace**:
-1. Extrae datos del endpoint `/interesados`
-2. Guarda respuesta cruda en `raw_api_data`
-3. Parsea y normaliza datos en `interesados`
+El orquestador ejecuta los extractores configurados en tu `.env`:
 
-**Tablas que llena**:
-- `raw_api_data`
-- `interesados`
+1. **Extractor de Interesados** (si `API_URL_1` está configurado):
+   - Extrae datos del endpoint `/interesados`
+   - Guarda respuesta cruda en `raw_api_data`
+   - Parsea y normaliza datos en `interesados`
+
+2. **Extractor de Solicitudes y Documentos** (si `CEN_YEARS` está configurado):
+   - Extrae solicitudes por año usando parámetro `tipo=6`
+   - Guarda solicitudes en tabla `solicitudes`
+   - Para cada solicitud, extrae documentos usando parámetro `tipo=11`
+   - Filtra solo documentos importantes (SUCTD, SAC, Formulario_proyecto_fehaciente)
+   - Guarda documentos en tabla `documentos`
+   - **TODAS las respuestas API se guardan en `raw_api_data` como audit trail**
 
 **Comando**:
 ```bash
-docker-compose run --rm cen_app
-# o
+# Configurar en .env:
+# API_URL_1=https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public/interesados
+# CEN_API_BASE_URL=https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public
+# CEN_YEARS=2024,2025
+# CEN_DOCUMENT_TYPES=Formulario SUCTD,Formulario SAC,Formulario_proyecto_fehaciente
+
+# Ejecuta TODOS los extractors configurados:
 uv run python -m src.main
+
+# O con Docker:
+docker-compose run --rm cen_app
 ```
+
+**Nota**: El orquestador detecta automáticamente qué extractors ejecutar basándose en las variables de entorno configuradas. Si no hay `API_URL_1`, salta interesados. Si no hay `CEN_YEARS`, salta solicitudes.
 
 ---
 
-### Script 2: `src/main_cen.py` (Sistema Nuevo - Solicitudes y Documentos)
+## Arquitectura Unificada
 
-**Qué hace**:
-1. Extrae solicitudes por año (tipo=6)
-2. Guarda en `solicitudes`
-3. Para cada solicitud, extrae documentos (tipo=11)
-4. Filtra documentos importantes
-5. Guarda en `documentos`
+**Ambos scripts son parte del mismo sistema CEN y usan la misma API base:**
 
-**Tablas que llena**:
-- `raw_api_data` (indirectamente, si se usa)
-- `solicitudes`
-- `documentos`
+```
+CEN API: https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public
+│
+├─→ Endpoint /interesados                  → main.py      → tabla interesados
+│
+└─→ Endpoints parametrizados (tipo=0-11)   → main_cen.py  → tablas solicitudes + documentos
+    ├─ tipo=6  (solicitudes por año)
+    └─ tipo=11 (documentos por solicitud_id)
 
-**Comando**:
-```bash
-uv run python -m src.main_cen
+Audit Trail Compartido:
+└─→ raw_api_data (TODOS los scripts guardan aquí sus respuestas API)
 ```
 
 ---

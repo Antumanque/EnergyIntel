@@ -47,7 +47,8 @@ services:
       CEN_YEARS: ${CEN_YEARS:-2025}
       CEN_DOCUMENT_TYPES: ${CEN_DOCUMENT_TYPES:-Formulario SUCTD,Formulario SAC,Proyecto Fehaciente}
 
-      # API configuration (numbered list: API_URL_1, API_URL_2, etc.) - legacy
+      # API configuration (numbered list: API_URL_1, API_URL_2, etc.)
+      # Used by main.py for /interesados endpoint
       API_URL_1: ${API_URL_1:-}
       API_URL_2: ${API_URL_2:-}
       API_URL_3: ${API_URL_3:-}

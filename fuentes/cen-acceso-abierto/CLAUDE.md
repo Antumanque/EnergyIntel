@@ -22,41 +22,81 @@ This is designed as a **template project** that can be extended for web scraping
 
 ### High-Level Design
 
-The project follows a **simple, modular architecture**:
+The project follows a **clean, layered architecture** with separation of concerns:
 
 ```
-User/Cron → main.py → API Client → External APIs
-                   ↓
-                Database Manager → MariaDB
+User/Cron → main.py (Orchestrator)
+                ↓
+         ┌──────┴──────┐
+         ↓             ↓
+   Interesados    Solicitudes
+   Extractor      Extractor
+         ↓             ↓
+    Parsers ←────→ HTTP Client
+         ↓             ↓
+   Repositories → MariaDB
+```
+
+### Module Structure
+
+```
+src/
+├── main.py                      # Orchestrator (no business logic)
+│
+├── extractors/                  # Extraction logic
+│   ├── interesados.py          # /interesados endpoint
+│   └── solicitudes.py          # tipo=6, tipo=11 endpoints
+│
+├── parsers/                     # Data transformation
+│   ├── interesados.py          # JSON → dict
+│   └── solicitudes.py          # JSON → dict
+│
+├── repositories/                # Database access
+│   ├── base.py                 # Generic DatabaseManager
+│   └── cen.py                  # CEN-specific tables
+│
+├── http_client.py              # HTTP operations
+└── settings.py                 # Configuration
 ```
 
 ### Module Responsibilities
 
-1. **`src/main.py`** - Main orchestration
+1. **`src/main.py`** - Orchestrator (Pure)
+   - NO business logic
    - Loads configuration
-   - Initializes database
-   - Iterates through API URLs
-   - Coordinates fetch and store operations
-   - Reports results and handles exit codes
+   - Determines which extractors to run
+   - Executes extractors in order
+   - Reports overall results
 
-2. **`src/settings.py`** - Configuration management
-   - Uses pydantic-settings for type-safe config
-   - Loads from environment variables and .env files
-   - Provides validated settings as a singleton
-   - Includes helper methods like `get_db_config()`
+2. **`src/extractors/`** - Extraction Logic
+   - **`interesados.py`**: Extracts stakeholder data from `/interesados` endpoint
+   - **`solicitudes.py`**: Extracts projects (tipo=6) and documents (tipo=11)
+   - Each extractor is self-contained with its own run() method
+   - Handles API calls, parsing, and database storage
 
-3. **`src/database.py`** - Database operations
+3. **`src/parsers/`** - Data Transformation
+   - **`interesados.py`**: Transforms raw JSON to normalized stakeholder records
+   - **`solicitudes.py`**: Transforms raw JSON to solicitud/documento records
+   - Pure functions with no side effects
+   - Easy to test and modify
+
+4. **`src/repositories/`** - Database Access Layer
+   - **`base.py`**: Generic DatabaseManager for `raw_api_data` and `interesados` tables
+   - **`cen.py`**: CENDatabaseManager for `solicitudes` and `documentos` tables
    - Connection management with context managers
-   - Table creation (idempotent)
-   - Raw data insertion with JSON storage
-   - Query helpers for latest fetches
-   - Proper error handling and logging
+   - Bulk insert operations with append-only strategy
 
-4. **`src/client.py`** - HTTP client
+5. **`src/http_client.py`** - HTTP Operations
    - Retry logic with exponential backoff
    - Configurable timeouts
    - Returns tuple: (status_code, data, error)
-   - Includes async version for future concurrent fetches
+   - Shared by all extractors
+
+6. **`src/settings.py`** - Configuration Management
+   - Type-safe configuration using pydantic-settings
+   - Loads from environment variables and .env files
+   - Singleton pattern
+   - Includes helper methods like `get_db_config()`
 
 ### Database Schema
 
@@ -494,12 +534,27 @@ El sistema **NUNCA** actualiza ni elimina registros:
 3. **Ampliar cobertura**: Procesar años 2020-2024
 4. **Automatización**: Configurar cron para ejecución periódica
 
-### Relación con Sistema Anterior
+### Arquitectura Unificada del Sistema CEN
 
-El sistema anterior (`src/main.py`) extrae datos del endpoint `/interesados` que lista empresas stakeholders de cada solicitud. Este se relaciona con el nuevo sistema via `solicitud_id`:
+**Todos los componentes son parte del mismo sistema CEN**, usando la misma API base:
 
+```
+CEN API Base: https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public
+│
+├─→ src/main.py          → Endpoint /interesados      → tabla interesados
+│                           (empresas stakeholders)
+│
+└─→ src/main_cen.py      → Endpoints parametrizados   → tablas solicitudes + documentos
+    ├─ tipo=6              (solicitudes por año)
+    └─ tipo=11             (documentos por solicitud_id)
+
+Audit Trail Compartido:
+└─→ raw_api_data (AMBOS scripts guardan todas sus respuestas API aquí)
+```
+
+**Relación entre tablas**:
 ```
 interesados.solicitud_id → solicitudes.id (many-to-one)
 ```
 
-Ambos sistemas pueden coexistir y se complementan.
+Ambos scripts se complementan para proporcionar la vista completa de cada proyecto eléctrico.

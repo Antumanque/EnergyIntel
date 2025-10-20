@@ -66,7 +66,7 @@ class Settings(BaseSettings):
             return [d.strip() for d in self.cen_document_types.split(',') if d.strip()]
         return ["Formulario SUCTD", "Formulario SAC", "Formulario_proyecto_fehaciente"]
 
-    # API configuration (legacy, keep for backward compatibility)
+    # API configuration (used by main.py for /interesados endpoint)
     api_urls: List[str] = Field(
         default_factory=list,
         description="List of API URLs to fetch (use API_URL_1, API_URL_2, etc.)",

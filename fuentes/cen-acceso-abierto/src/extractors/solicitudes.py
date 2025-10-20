@@ -12,13 +12,30 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
-from src.client import APIClient
-from src.settings import Settings
+from src.http_client import APIClient, get_api_client
+from src.repositories.cen import CENDatabaseManager, get_cen_db_manager
+from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 
-class CENExtractor:
+def flatten_documentos(documentos_by_solicitud: Dict[int, List[dict]]) -> List[dict]:
+    """
+    Convierte dict de {solicitud_id: [documentos]} a lista plana de documentos.
+
+    Args:
+        documentos_by_solicitud: Diccionario con documentos por solicitud
+
+    Returns:
+        Lista plana de documentos
+    """
+    all_documentos = []
+    for solicitud_id, documentos in documentos_by_solicitud.items():
+        all_documentos.extend(documentos)
+    return all_documentos
+
+
+class SolicitudesExtractor:
     """
     Extractor de datos del CEN Acceso Abierto.
 
@@ -26,14 +43,14 @@ class CENExtractor:
     Guarda todas las respuestas raw en raw_api_data para audit trail.
     """
 
-    def __init__(self, settings: Settings, api_client: APIClient, db_manager=None):
+    def __init__(self, settings: Settings, api_client: APIClient, db_manager: CENDatabaseManager):
         """
         Inicializa el extractor.
 
         Args:
             settings: Configuración de la aplicación
             api_client: Cliente HTTP para realizar requests
-            db_manager: Gestor de base de datos (opcional, para guardar raw responses)
+            db_manager: Gestor de base de datos CEN
         """
         self.settings = settings
         self.api_client = api_client
@@ -254,17 +271,123 @@ class CENExtractor:
 
         return results
 
+    def run(self) -> int:
+        """
+        Ejecuta el flujo completo de extracción de solicitudes y documentos.
 
-def get_cen_extractor(settings: Settings, api_client: APIClient, db_manager=None) -> CENExtractor:
+        Returns:
+            Código de salida (0 = éxito, 1 = error)
+        """
+        logger.info("=" * 70)
+        logger.info("🚀 INICIANDO EXTRACCIÓN CEN ACCESO ABIERTO")
+        logger.info("=" * 70)
+
+        try:
+            # Cargar configuración
+            logger.info("\n📋 Configuración:")
+            logger.info(f"  Base URL: {self.settings.cen_api_base_url}")
+            logger.info(f"  Años a procesar: {self.settings.cen_years_list}")
+            logger.info(f"  Tipos de documento: {self.settings.cen_document_types_list}")
+
+            # Verificar conexión a base de datos
+            logger.info("\n🔌 Verificando conexión a base de datos...")
+            if not self.db_manager.test_connection():
+                logger.error("❌ No se pudo conectar a la base de datos. Abortando.")
+                return 1
+
+            # Crear tablas si no existen
+            logger.info("\n🏗️  Creando/verificando tablas...")
+            self.db_manager.create_tables()
+
+            # PASO 1: Extraer solicitudes
+            logger.info("\n" + "=" * 70)
+            logger.info("PASO 1: EXTRACCIÓN DE SOLICITUDES")
+            logger.info("=" * 70)
+
+            solicitudes_results = self.extract_all_years()
+
+            if solicitudes_results["total_solicitudes"] == 0:
+                logger.warning("⚠️ No se extrajeron solicitudes. Abortando.")
+                return 1
+
+            # Aplanar solicitudes de todos los años
+            all_solicitudes = []
+            for anio, solicitudes in solicitudes_results["solicitudes_by_year"].items():
+                all_solicitudes.extend(solicitudes)
+
+            logger.info(f"\n📥 Guardando {len(all_solicitudes)} solicitudes en la base de datos...")
+            inserted_solicitudes = self.db_manager.insert_solicitudes_bulk(all_solicitudes)
+            logger.info(f"✅ {inserted_solicitudes} solicitudes nuevas insertadas")
+
+            # PASO 2: Extraer documentos
+            logger.info("\n" + "=" * 70)
+            logger.info("PASO 2: EXTRACCIÓN DE DOCUMENTOS")
+            logger.info("=" * 70)
+
+            # Obtener IDs de todas las solicitudes extraídas
+            solicitud_ids = [s["id"] for s in all_solicitudes]
+            logger.info(f"📋 Procesando documentos de {len(solicitud_ids)} solicitudes...")
+
+            documentos_results = self.extract_documentos_for_solicitudes(solicitud_ids)
+
+            if documentos_results["documentos_importantes"] == 0:
+                logger.warning("⚠️ No se encontraron documentos importantes.")
+            else:
+                # Aplanar documentos
+                all_documentos = flatten_documentos(documentos_results["documentos_by_solicitud"])
+
+                logger.info(f"\n📥 Guardando {len(all_documentos)} documentos en la base de datos...")
+                inserted_documentos = self.db_manager.insert_documentos_bulk(all_documentos)
+                logger.info(f"✅ {inserted_documentos} documentos nuevos insertados")
+
+            # PASO 3: Mostrar estadísticas finales
+            logger.info("\n" + "=" * 70)
+            logger.info("📊 ESTADÍSTICAS FINALES")
+            logger.info("=" * 70)
+
+            stats = self.db_manager.get_stats()
+            logger.info(f"  Total solicitudes en BD: {stats.get('total_solicitudes', 0)}")
+            logger.info(f"  Total documentos en BD: {stats.get('total_documentos', 0)}")
+            logger.info(f"    - Formulario SUCTD: {stats.get('docs_suctd', 0)}")
+            logger.info(f"    - Formulario SAC: {stats.get('docs_sac', 0)}")
+            logger.info(f"    - Formulario_proyecto_fehaciente: {stats.get('docs_fehaciente', 0)}")
+            logger.info(f"  Total raw API responses: {stats.get('total_raw_responses', 0)}")
+
+            logger.info("\n" + "=" * 70)
+            logger.info("✅ PROCESO COMPLETADO EXITOSAMENTE")
+            logger.info("=" * 70)
+
+            return 0
+
+        except KeyboardInterrupt:
+            logger.warning("\n⚠️ Proceso interrumpido por el usuario")
+            return 1
+        except Exception as e:
+            logger.error(f"\n❌ Error inesperado: {e}", exc_info=True)
+            return 1
+
+
+def get_solicitudes_extractor(
+    settings: Settings = None,
+    api_client: APIClient = None,
+    db_manager: CENDatabaseManager = None,
+) -> SolicitudesExtractor:
     """
     Factory function para crear instancia del extractor.
 
     Args:
-        settings: Configuración de la aplicación
-        api_client: Cliente HTTP
-        db_manager: Gestor de BD (opcional, para guardar raw responses)
+        settings: Configuración (si None, se carga automáticamente)
+        api_client: Cliente HTTP (si None, se crea automáticamente)
+        db_manager: Gestor de BD CEN (si None, se crea automáticamente)
 
     Returns:
-        Instancia de CENExtractor
+        Instancia de SolicitudesExtractor
     """
-    return CENExtractor(settings, api_client, db_manager)
+    if settings is None:
+        settings = get_settings()
+    if api_client is None:
+        api_client = get_api_client(settings)
+    if db_manager is None:
+        db_manager = get_cen_db_manager()
+
+    return SolicitudesExtractor(settings, api_client, db_manager)
