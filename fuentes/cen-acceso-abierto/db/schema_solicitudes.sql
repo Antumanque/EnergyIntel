@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS documentos (
     downloaded TINYINT(1) DEFAULT 0 COMMENT 'Si el archivo fue descargado localmente',
     downloaded_at TIMESTAMP NULL COMMENT 'Fecha de descarga del archivo',
     local_path VARCHAR(500) COMMENT 'Ruta local del archivo descargado',
+    download_error TEXT COMMENT 'Mensaje de error si la descarga falló',
 
     -- Foreign key
     FOREIGN KEY (solicitud_id) REFERENCES solicitudes(id) ON DELETE CASCADE,
@@ -174,6 +175,48 @@ GROUP BY s.id;
 
 -- ============================================================================
 
+-- Vista: documentos_ultimas_versiones
+-- Filtra SOLO la última versión de cada documento por solicitud y tipo
+-- Elimina duplicados cuando un documento se sube múltiples veces
+CREATE OR REPLACE VIEW documentos_ultimas_versiones AS
+SELECT
+    d.*
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY solicitud_id, tipo_documento
+            ORDER BY create_date DESC, id DESC
+        ) as rn
+    FROM documentos
+    WHERE deleted = 0
+      AND visible = 1
+) d
+WHERE d.rn = 1;
+
+-- ============================================================================
+
+-- Vista: documentos_listos_para_parsear
+-- Documentos únicos (última versión) que ya fueron descargados
+-- Incluye columna de formato detectado para filtrar por tipo de archivo
+CREATE OR REPLACE VIEW documentos_listos_para_parsear AS
+SELECT
+    d.*,
+    CASE
+        WHEN d.nombre LIKE '%.pdf' THEN 'PDF'
+        WHEN d.nombre LIKE '%.xlsx' THEN 'XLSX'
+        WHEN d.nombre LIKE '%.xls' THEN 'XLS'
+        WHEN d.nombre LIKE '%.zip' THEN 'ZIP'
+        WHEN d.nombre LIKE '%.rar' THEN 'RAR'
+        ELSE 'OTRO'
+    END AS formato_archivo
+FROM documentos_ultimas_versiones d
+WHERE d.downloaded = 1
+  AND d.local_path IS NOT NULL
+  AND d.tipo_documento IN ('Formulario SAC', 'Formulario SUCTD', 'Formulario_proyecto_fehaciente');
+
+-- ============================================================================
+
 -- Vista: estadisticas_extraccion
 -- Estadísticas generales de la extracción
 CREATE OR REPLACE VIEW estadisticas_extraccion AS
@@ -186,6 +229,12 @@ SELECT
     'Documentos totales',
     COUNT(*)
 FROM documentos
+UNION ALL
+SELECT
+    'Documentos únicos (última versión)',
+    COUNT(*)
+FROM documentos_ultimas_versiones
+WHERE tipo_documento IN ('Formulario SAC', 'Formulario SUCTD', 'Formulario_proyecto_fehaciente')
 UNION ALL
 SELECT
     'Documentos SUCTD',
@@ -209,7 +258,12 @@ SELECT
     'Documentos descargados',
     COUNT(*)
 FROM documentos
-WHERE downloaded = 1;
+WHERE downloaded = 1
+UNION ALL
+SELECT
+    'Documentos listos para parsear',
+    COUNT(*)
+FROM documentos_listos_para_parsear;
 
 -- ============================================================================
 -- Fin del schema

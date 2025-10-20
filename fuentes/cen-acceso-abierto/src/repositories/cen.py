@@ -398,6 +398,104 @@ class CENDatabaseManager:
             logger.error(f"❌ Error al guardar raw API response: {e}", exc_info=True)
             # No propagamos el error para no romper el flujo principal
 
+    def get_documentos_pendientes_descarga(
+        self,
+        tipo_documento: Optional[str] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Obtiene documentos que aún no han sido descargados.
+
+        Args:
+            tipo_documento: Filtrar por tipo específico (opcional)
+            limit: Limitar número de resultados (opcional)
+
+        Returns:
+            Lista de documentos pendientes de descarga
+        """
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor(dictionary=True)
+
+                query = """
+                    SELECT id, solicitud_id, nombre, ruta_s3, tipo_documento
+                    FROM documentos
+                    WHERE downloaded = 0
+                    AND deleted = 0
+                    AND visible = 1
+                    AND ruta_s3 IS NOT NULL
+                    AND ruta_s3 != ''
+                """
+
+                params = []
+                if tipo_documento:
+                    query += " AND tipo_documento = %s"
+                    params.append(tipo_documento)
+
+                query += " ORDER BY id"
+
+                if limit:
+                    query += " LIMIT %s"
+                    params.append(limit)
+
+                cursor.execute(query, params)
+                documentos = cursor.fetchall()
+
+                logger.info(f"📊 {len(documentos)} documentos pendientes de descarga")
+                return documentos
+
+        except Error as e:
+            logger.error(f"Error al obtener documentos pendientes: {e}")
+            return []
+
+    def mark_documento_downloaded(
+        self,
+        documento_id: int,
+        local_path: str,
+        download_error: Optional[str] = None
+    ) -> None:
+        """
+        Marca un documento como descargado (o con error).
+
+        Args:
+            documento_id: ID del documento
+            local_path: Ruta local donde se guardó el archivo
+            download_error: Mensaje de error si la descarga falló (None si exitoso)
+        """
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                if download_error:
+                    # Descarga falló - registrar error
+                    update_sql = """
+                        UPDATE documentos
+                        SET downloaded = 0,
+                            local_path = NULL,
+                            download_error = %s
+                        WHERE id = %s
+                    """
+                    cursor.execute(update_sql, (download_error, documento_id))
+                    logger.warning(f"⚠️  Documento {documento_id} - Error: {download_error}")
+                else:
+                    # Descarga exitosa
+                    update_sql = """
+                        UPDATE documentos
+                        SET downloaded = 1,
+                            downloaded_at = NOW(),
+                            local_path = %s,
+                            download_error = NULL
+                        WHERE id = %s
+                    """
+                    cursor.execute(update_sql, (local_path, documento_id))
+                    logger.debug(f"✅ Documento {documento_id} marcado como descargado")
+
+                conn.commit()
+
+        except Error as e:
+            logger.error(f"❌ Error al marcar documento como descargado: {e}", exc_info=True)
+            raise
+
     def get_stats(self) -> Dict[str, int]:
         """
         Obtiene estadísticas de la base de datos.
@@ -438,6 +536,10 @@ class CENDatabaseManager:
                 """)
                 docs_fehaciente = cursor.fetchone()[0]
 
+                # Documentos descargados
+                cursor.execute("SELECT COUNT(*) FROM documentos WHERE downloaded = 1")
+                docs_descargados = cursor.fetchone()[0]
+
                 # Total raw API responses
                 cursor.execute("SELECT COUNT(*) FROM raw_api_data")
                 total_raw_responses = cursor.fetchone()[0]
@@ -448,11 +550,427 @@ class CENDatabaseManager:
                     "docs_suctd": docs_suctd,
                     "docs_sac": docs_sac,
                     "docs_fehaciente": docs_fehaciente,
+                    "docs_descargados": docs_descargados,
                     "total_raw_responses": total_raw_responses,
                 }
         except Error as e:
             logger.error(f"Error al obtener estadísticas: {e}")
             return {}
+
+
+    def insert_formulario_parseado(
+        self,
+        documento_id: int,
+        tipo_formulario: str,
+        formato_archivo: str,
+        parsing_exitoso: bool,
+        parser_version: str,
+        parsing_error: Optional[str] = None,
+        pdf_producer: Optional[str] = None,
+        pdf_author: Optional[str] = None,
+        pdf_title: Optional[str] = None,
+        pdf_creation_date: Optional[str] = None
+    ) -> Optional[int]:
+        """
+        Registra un intento de parsing de formulario (exitoso o fallido).
+
+        Este método implementa el tracking granular de cada parsing attempt.
+        Si el parsing falla, el error se registra para debugging posterior.
+
+        Args:
+            documento_id: ID del documento que se parseó
+            tipo_formulario: SAC, SUCTD o FEHACIENTE
+            formato_archivo: PDF, XLSX o XLS
+            parsing_exitoso: True si el parsing fue exitoso
+            parser_version: Versión del parser usado (ej: "1.0.0")
+            parsing_error: Mensaje de error si parsing_exitoso=False
+            pdf_producer: Producer del PDF (ej: "Microsoft: Print To PDF")
+            pdf_author: Author del PDF
+            pdf_title: Title del PDF
+            pdf_creation_date: CreationDate del PDF en formato MySQL DATETIME
+
+        Returns:
+            ID del registro insertado, o None si ya existe
+        """
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                # Verificar si ya existe un registro de parsing exitoso
+                cursor.execute("""
+                    SELECT id FROM formularios_parseados
+                    WHERE documento_id = %s AND parsing_exitoso = 1
+                """, (documento_id,))
+
+                existing = cursor.fetchone()
+                if existing:
+                    logger.info(f"✅ Documento {documento_id} ya fue parseado exitosamente (skipped)")
+                    return existing[0]
+
+                # Insertar nuevo registro de parsing
+                insert_sql = """
+                    INSERT INTO formularios_parseados (
+                        documento_id, tipo_formulario, formato_archivo,
+                        parsing_exitoso, parsing_error, parser_version,
+                        pdf_producer, pdf_author, pdf_title, pdf_creation_date,
+                        parsed_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        parsing_exitoso = VALUES(parsing_exitoso),
+                        parsing_error = VALUES(parsing_error),
+                        parser_version = VALUES(parser_version),
+                        pdf_producer = VALUES(pdf_producer),
+                        pdf_author = VALUES(pdf_author),
+                        pdf_title = VALUES(pdf_title),
+                        pdf_creation_date = VALUES(pdf_creation_date),
+                        parsed_at = NOW()
+                """
+
+                cursor.execute(insert_sql, (
+                    documento_id, tipo_formulario, formato_archivo,
+                    parsing_exitoso, parsing_error, parser_version,
+                    pdf_producer, pdf_author, pdf_title, pdf_creation_date
+                ))
+                conn.commit()
+
+                formulario_parseado_id = cursor.lastrowid
+
+                if parsing_exitoso:
+                    logger.debug(f"✅ Parsing exitoso registrado: documento {documento_id}")
+                else:
+                    logger.warning(f"⚠️  Parsing fallido registrado: documento {documento_id} - {parsing_error}")
+
+                return formulario_parseado_id
+
+        except Error as e:
+            logger.error(f"❌ Error al registrar parsing: {e}", exc_info=True)
+            raise
+
+    def insert_formulario_sac_parsed(
+        self,
+        formulario_parseado_id: int,
+        documento_id: int,
+        solicitud_id: int,
+        data: Dict[str, Any]
+    ) -> bool:
+        """
+        Inserta datos parseados de un Formulario SAC.
+
+        Este método valida campos mínimos antes de insertar para asegurar
+        calidad de datos. Si faltan campos críticos, el insert falla.
+
+        Args:
+            formulario_parseado_id: FK a formularios_parseados.id
+            documento_id: FK a documentos.id
+            solicitud_id: FK a solicitudes.id
+            data: Diccionario con campos parseados del formulario
+
+        Returns:
+            True si el insert fue exitoso, False en caso contrario
+
+        Raises:
+            ValueError: Si faltan campos críticos mínimos
+        """
+        # Validación: Verificar campos críticos mínimos
+        # Estos campos son ESENCIALES para considerar el parsing como válido
+        required_fields = ["razon_social", "rut", "nombre_proyecto"]
+        missing_fields = [f for f in required_fields if not data.get(f)]
+
+        if missing_fields:
+            error_msg = f"Faltan campos críticos: {', '.join(missing_fields)}"
+            logger.error(f"❌ {error_msg}")
+            raise ValueError(error_msg)
+
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                insert_sql = """
+                    INSERT INTO formularios_sac_parsed (
+                        formulario_parseado_id, documento_id, solicitud_id,
+                        razon_social, rut, giro, domicilio_legal,
+                        representante_legal_nombre, representante_legal_email, representante_legal_telefono,
+                        coordinador_proyecto_1_nombre, coordinador_proyecto_1_email, coordinador_proyecto_1_telefono,
+                        coordinador_proyecto_2_nombre, coordinador_proyecto_2_email, coordinador_proyecto_2_telefono,
+                        coordinador_proyecto_3_nombre, coordinador_proyecto_3_email, coordinador_proyecto_3_telefono,
+                        nombre_proyecto, tipo_proyecto, tecnologia, potencia_nominal_mw,
+                        consumo_propio_mw, factor_potencia,
+                        proyecto_coordenadas_utm_huso, proyecto_coordenadas_utm_este, proyecto_coordenadas_utm_norte,
+                        proyecto_comuna, proyecto_region,
+                        nombre_subestacion, nivel_tension_kv, caracter_conexion,
+                        fecha_estimada_construccion, fecha_estimada_interconexion,
+                        conexion_coordenadas_utm_huso, conexion_coordenadas_utm_este, conexion_coordenadas_utm_norte,
+                        conexion_comuna, conexion_region,
+                        created_at
+                    ) VALUES (
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        NOW()
+                    )
+                """
+
+                cursor.execute(insert_sql, (
+                    formulario_parseado_id, documento_id, solicitud_id,
+                    # Antecedentes Generales del Solicitante
+                    data.get("razon_social"),
+                    data.get("rut"),
+                    data.get("giro"),
+                    data.get("domicilio_legal"),
+                    # Representante Legal
+                    data.get("representante_legal_nombre"),
+                    data.get("representante_legal_email"),
+                    data.get("representante_legal_telefono"),
+                    # Coordinadores de Proyecto
+                    data.get("coordinador_proyecto_1_nombre"),
+                    data.get("coordinador_proyecto_1_email"),
+                    data.get("coordinador_proyecto_1_telefono"),
+                    data.get("coordinador_proyecto_2_nombre"),
+                    data.get("coordinador_proyecto_2_email"),
+                    data.get("coordinador_proyecto_2_telefono"),
+                    data.get("coordinador_proyecto_3_nombre"),
+                    data.get("coordinador_proyecto_3_email"),
+                    data.get("coordinador_proyecto_3_telefono"),
+                    # Antecedentes del Proyecto
+                    data.get("nombre_proyecto"),
+                    data.get("tipo_proyecto"),
+                    data.get("tecnologia"),
+                    data.get("potencia_nominal_mw"),
+                    data.get("consumo_propio_mw"),
+                    data.get("factor_potencia"),
+                    # Ubicación Geográfica del Proyecto
+                    data.get("proyecto_coordenadas_utm_huso"),
+                    data.get("proyecto_coordenadas_utm_este"),
+                    data.get("proyecto_coordenadas_utm_norte"),
+                    data.get("proyecto_comuna"),
+                    data.get("proyecto_region"),
+                    # Antecedentes del Punto de Conexión
+                    data.get("nombre_subestacion"),
+                    data.get("nivel_tension_kv"),
+                    data.get("caracter_conexion"),
+                    data.get("fecha_estimada_construccion"),
+                    data.get("fecha_estimada_interconexion"),
+                    # Ubicación Geográfica del Punto de Conexión
+                    data.get("conexion_coordenadas_utm_huso"),
+                    data.get("conexion_coordenadas_utm_este"),
+                    data.get("conexion_coordenadas_utm_norte"),
+                    data.get("conexion_comuna"),
+                    data.get("conexion_region"),
+                ))
+
+                conn.commit()
+                logger.info(f"✅ Formulario SAC parseado insertado: documento {documento_id}")
+                return True
+
+        except Error as e:
+            logger.error(f"❌ Error al insertar formulario SAC parseado: {e}", exc_info=True)
+            return False
+
+    def parse_and_store_sac_document(
+        self,
+        documento_id: int,
+        solicitud_id: int,
+        local_path: str,
+        parser_version: str = "1.0.0"
+    ) -> bool:
+        """
+        Parsea un documento SAC y guarda los datos en una TRANSACCIÓN.
+
+        Este es el método de alto nivel que orquesta todo el proceso:
+        1. Parsea el PDF con SACPDFParser
+        2. Valida campos mínimos
+        3. Inserta en formularios_parseados + formularios_sac_parsed en UNA transacción
+        4. Si algo falla, hace rollback automático
+
+        Args:
+            documento_id: ID del documento a parsear
+            solicitud_id: ID de la solicitud asociada
+            local_path: Ruta local del archivo PDF
+            parser_version: Versión del parser (default: "1.0.0")
+
+        Returns:
+            True si el parsing y storage fue exitoso, False en caso contrario
+        """
+        from src.parsers.pdf_sac import parse_sac_pdf
+
+        try:
+            # Paso 1: Parsear el PDF
+            logger.info(f"📄 Parseando documento {documento_id}: {local_path}")
+            parsed_data = parse_sac_pdf(local_path)
+
+            # Paso 2: Validar campos mínimos
+            required_fields = ["razon_social", "rut", "nombre_proyecto"]
+            missing_fields = [f for f in required_fields if not parsed_data.get(f)]
+
+            if missing_fields:
+                error_msg = f"Campos críticos faltantes: {', '.join(missing_fields)}"
+                logger.warning(f"⚠️  {error_msg}")
+
+                # Registrar parsing FALLIDO
+                self.insert_formulario_parseado(
+                    documento_id=documento_id,
+                    tipo_formulario="SAC",
+                    formato_archivo="PDF",
+                    parsing_exitoso=False,
+                    parser_version=parser_version,
+                    parsing_error=error_msg
+                )
+                return False
+
+            # Paso 3: Insertar en ambas tablas (TRANSACCIÓN)
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                try:
+                    # 3.1: Insertar tracking en formularios_parseados (con metadata)
+                    cursor.execute("""
+                        INSERT INTO formularios_parseados (
+                            documento_id, tipo_formulario, formato_archivo,
+                            parsing_exitoso, parser_version,
+                            pdf_producer, pdf_author, pdf_title, pdf_creation_date,
+                            parsed_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON DUPLICATE KEY UPDATE
+                            parsing_exitoso = VALUES(parsing_exitoso),
+                            parser_version = VALUES(parser_version),
+                            pdf_producer = VALUES(pdf_producer),
+                            pdf_author = VALUES(pdf_author),
+                            pdf_title = VALUES(pdf_title),
+                            pdf_creation_date = VALUES(pdf_creation_date),
+                            parsed_at = NOW()
+                    """, (
+                        documento_id, "SAC", "PDF", True, parser_version,
+                        parsed_data.get('pdf_producer'),
+                        parsed_data.get('pdf_author'),
+                        parsed_data.get('pdf_title'),
+                        parsed_data.get('pdf_creation_date')
+                    ))
+
+                    formulario_parseado_id = cursor.lastrowid
+
+                    # 3.2: Insertar datos parseados en formularios_sac_parsed
+                    cursor.execute("""
+                        INSERT INTO formularios_sac_parsed (
+                            formulario_parseado_id, documento_id, solicitud_id,
+                            razon_social, rut, giro, domicilio_legal,
+                            representante_legal_nombre, representante_legal_email, representante_legal_telefono,
+                            coordinador_proyecto_1_nombre, coordinador_proyecto_1_email, coordinador_proyecto_1_telefono,
+                            coordinador_proyecto_2_nombre, coordinador_proyecto_2_email, coordinador_proyecto_2_telefono,
+                            coordinador_proyecto_3_nombre, coordinador_proyecto_3_email, coordinador_proyecto_3_telefono,
+                            nombre_proyecto, tipo_proyecto, tecnologia, potencia_nominal_mw,
+                            consumo_propio_mw, factor_potencia,
+                            proyecto_coordenadas_utm_huso, proyecto_coordenadas_utm_este, proyecto_coordenadas_utm_norte,
+                            proyecto_comuna, proyecto_region,
+                            nombre_subestacion, nivel_tension_kv, caracter_conexion,
+                            fecha_estimada_construccion, fecha_estimada_interconexion,
+                            conexion_coordenadas_utm_huso, conexion_coordenadas_utm_este, conexion_coordenadas_utm_norte,
+                            conexion_comuna, conexion_region,
+                            created_at
+                        ) VALUES (
+                            %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            NOW()
+                        )
+                    """, (
+                        formulario_parseado_id, documento_id, solicitud_id,
+                        parsed_data.get("razon_social"),
+                        parsed_data.get("rut"),
+                        parsed_data.get("giro"),
+                        parsed_data.get("domicilio_legal"),
+                        parsed_data.get("representante_legal_nombre"),
+                        parsed_data.get("representante_legal_email"),
+                        parsed_data.get("representante_legal_telefono"),
+                        parsed_data.get("coordinador_proyecto_1_nombre"),
+                        parsed_data.get("coordinador_proyecto_1_email"),
+                        parsed_data.get("coordinador_proyecto_1_telefono"),
+                        parsed_data.get("coordinador_proyecto_2_nombre"),
+                        parsed_data.get("coordinador_proyecto_2_email"),
+                        parsed_data.get("coordinador_proyecto_2_telefono"),
+                        parsed_data.get("coordinador_proyecto_3_nombre"),
+                        parsed_data.get("coordinador_proyecto_3_email"),
+                        parsed_data.get("coordinador_proyecto_3_telefono"),
+                        parsed_data.get("nombre_proyecto"),
+                        parsed_data.get("tipo_proyecto"),
+                        parsed_data.get("tecnologia"),
+                        parsed_data.get("potencia_nominal_mw"),
+                        parsed_data.get("consumo_propio_mw"),
+                        parsed_data.get("factor_potencia"),
+                        parsed_data.get("proyecto_coordenadas_utm_huso"),
+                        parsed_data.get("proyecto_coordenadas_utm_este"),
+                        parsed_data.get("proyecto_coordenadas_utm_norte"),
+                        parsed_data.get("proyecto_comuna"),
+                        parsed_data.get("proyecto_region"),
+                        parsed_data.get("nombre_subestacion"),
+                        parsed_data.get("nivel_tension_kv"),
+                        parsed_data.get("caracter_conexion"),
+                        parsed_data.get("fecha_estimada_construccion"),
+                        parsed_data.get("fecha_estimada_interconexion"),
+                        parsed_data.get("conexion_coordenadas_utm_huso"),
+                        parsed_data.get("conexion_coordenadas_utm_este"),
+                        parsed_data.get("conexion_coordenadas_utm_norte"),
+                        parsed_data.get("conexion_comuna"),
+                        parsed_data.get("conexion_region"),
+                    ))
+
+                    # Commit de la transacción
+                    conn.commit()
+                    logger.info(f"✅ Documento {documento_id} parseado y almacenado exitosamente")
+                    return True
+
+                except Error as e:
+                    # Rollback automático si algo falla
+                    conn.rollback()
+                    error_msg = f"Error en transacción: {str(e)}"
+                    logger.error(f"❌ {error_msg}", exc_info=True)
+
+                    # Registrar parsing FALLIDO
+                    self.insert_formulario_parseado(
+                        documento_id=documento_id,
+                        tipo_formulario="SAC",
+                        formato_archivo="PDF",
+                        parsing_exitoso=False,
+                        parser_version=parser_version,
+                        parsing_error=error_msg
+                    )
+                    return False
+
+        except Exception as e:
+            error_msg = f"Error al parsear PDF: {str(e)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+
+            # Registrar parsing FALLIDO
+            self.insert_formulario_parseado(
+                documento_id=documento_id,
+                tipo_formulario="SAC",
+                formato_archivo="PDF",
+                parsing_exitoso=False,
+                parser_version=parser_version,
+                parsing_error=error_msg
+            )
+            return False
 
 
 def get_cen_db_manager() -> CENDatabaseManager:
