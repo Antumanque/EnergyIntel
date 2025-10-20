@@ -51,7 +51,7 @@ class DatabaseSetup:
         Detecta si es una instalación fresca (BD vacía).
 
         Returns:
-            True si la BD está vacía o solo tiene schema_migrations
+            True si la BD está vacía o le faltan tablas críticas
         """
         cursor = conn.cursor()
 
@@ -61,10 +61,22 @@ class DatabaseSetup:
 
         logger.debug(f"📊 Tablas existentes: {tables}")
 
-        # Si no hay tablas o solo schema_migrations, es fresh install
-        is_fresh = len(tables) == 0 or tables == {'schema_migrations'}
+        # Tablas críticas que DEBEN existir para considerar que la BD está configurada
+        critical_tables = {
+            'raw_api_data',
+            'interesados',
+            'solicitudes',
+            'documentos'
+        }
 
-        return is_fresh
+        # Si no hay tablas O faltan tablas críticas, es fresh install
+        missing_critical = critical_tables - tables
+
+        if missing_critical:
+            logger.debug(f"⚠️  Faltan tablas críticas: {missing_critical}")
+            return True
+
+        return False
 
     def _execute_sql_file(self, conn, sql_file: Path) -> bool:
         """

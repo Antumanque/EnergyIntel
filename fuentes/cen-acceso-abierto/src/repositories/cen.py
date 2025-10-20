@@ -782,13 +782,14 @@ class CENDatabaseManager:
         documento_id: int,
         solicitud_id: int,
         local_path: str,
+        formato_archivo: str = "PDF",
         parser_version: str = "1.0.0"
     ) -> bool:
         """
-        Parsea un documento SAC y guarda los datos en una TRANSACCIÓN.
+        Parsea un documento SAC (PDF o XLSX) y guarda los datos en una TRANSACCIÓN.
 
         Este es el método de alto nivel que orquesta todo el proceso:
-        1. Parsea el PDF con SACPDFParser
+        1. Parsea el archivo con SACPDFParser o SACXLSXParser (según formato)
         2. Valida campos mínimos
         3. Inserta en formularios_parseados + formularios_sac_parsed en UNA transacción
         4. Si algo falla, hace rollback automático
@@ -796,18 +797,29 @@ class CENDatabaseManager:
         Args:
             documento_id: ID del documento a parsear
             solicitud_id: ID de la solicitud asociada
-            local_path: Ruta local del archivo PDF
+            local_path: Ruta local del archivo (PDF o XLSX)
+            formato_archivo: Formato del archivo ("PDF" o "XLSX", default: "PDF")
             parser_version: Versión del parser (default: "1.0.0")
 
         Returns:
             True si el parsing y storage fue exitoso, False en caso contrario
         """
-        from src.parsers.pdf_sac import parse_sac_pdf
+        from pathlib import Path
 
         try:
-            # Paso 1: Parsear el PDF
-            logger.info(f"📄 Parseando documento {documento_id}: {local_path}")
-            parsed_data = parse_sac_pdf(local_path)
+            # Paso 1: Parsear el archivo (PDF o XLSX)
+            logger.info(f"📄 Parseando documento {documento_id} ({formato_archivo}): {local_path}")
+
+            # Detectar formato si no se especifica (basado en extensión)
+            if formato_archivo == "PDF":
+                from src.parsers.pdf_sac import parse_sac_pdf
+                parsed_data = parse_sac_pdf(local_path)
+            elif formato_archivo in ("XLSX", "XLS"):
+                from src.parsers.xlsx_sac import SACXLSXParser
+                parser = SACXLSXParser()
+                parsed_data = parser.parse(local_path)
+            else:
+                raise ValueError(f"Formato no soportado: {formato_archivo}")
 
             # Paso 2: Validar campos mínimos
             required_fields = ["razon_social", "rut", "nombre_proyecto"]
@@ -821,7 +833,7 @@ class CENDatabaseManager:
                 self.insert_formulario_parseado(
                     documento_id=documento_id,
                     tipo_formulario="SAC",
-                    formato_archivo="PDF",
+                    formato_archivo=formato_archivo,
                     parsing_exitoso=False,
                     parser_version=parser_version,
                     parsing_error=error_msg
@@ -850,7 +862,7 @@ class CENDatabaseManager:
                             pdf_creation_date = VALUES(pdf_creation_date),
                             parsed_at = NOW()
                     """, (
-                        documento_id, "SAC", "PDF", True, parser_version,
+                        documento_id, "SAC", formato_archivo, True, parser_version,
                         parsed_data.get('pdf_producer'),
                         parsed_data.get('pdf_author'),
                         parsed_data.get('pdf_title'),

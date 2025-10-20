@@ -10,6 +10,7 @@ from src.parsers.solicitudes import (
     parse_documento,
 )
 from src.parsers.pdf_sac import SACPDFParser, parse_sac_pdf
+from src.parsers.xlsx_sac import SACXLSXParser
 
 __all__ = [
     "transform_interesados",
@@ -17,4 +18,5 @@ __all__ = [
     "parse_documento",
     "SACPDFParser",
     "parse_sac_pdf",
+    "SACXLSXParser",
 ]

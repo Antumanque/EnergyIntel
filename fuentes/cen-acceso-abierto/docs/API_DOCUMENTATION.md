@@ -714,5 +714,4 @@ CEN_DOCUMENT_TYPES=Formulario SUCTD,Formulario SAC,Formulario_proyecto_fehacient
 ---
 
 **Última actualización**: 2025-10-19
-**Investigado por**: Claude Code
 **Estado**: Completo ✅

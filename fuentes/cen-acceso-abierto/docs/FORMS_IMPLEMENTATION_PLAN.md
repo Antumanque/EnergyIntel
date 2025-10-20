@@ -585,6 +585,180 @@ GROUP BY tipo_formulario, formato;
 
 ---
 
+## 🆕 Parseo de Formularios XLSX (Excel)
+
+### Overview
+
+El sistema ahora soporta el parseo de formularios SAC en formato **XLSX** (Excel nativo), además del formato PDF existente.
+
+**Motivación**: Aunque la mayoría de empresas convierte los formularios a PDF antes de subirlos (99.9%), algunas empresas suben los archivos Excel originales sin convertir. El sistema ahora puede parsear ambos formatos.
+
+### Implementación
+
+#### 1. Parser XLSX (`src/parsers/xlsx_sac.py`)
+
+**Clase**: `SACXLSXParser`
+
+**Características**:
+- Usa `openpyxl` para leer archivos XLSX/XLS
+- Extrae datos de celdas específicas basándose en la estructura del template oficial
+- Normaliza fechas (datetime objects de Excel → MySQL DATE)
+- Normaliza coordenadas UTM y valores numéricos
+- Mapea campos a mismos nombres que PDF parser para compatibilidad
+
+**Estructura del XLSX detectada**:
+```
+- Labels siempre en columna B (col 2)
+- Valores en columnas D, E, F, G, H (cols 4-8) según el campo
+- Ejemplo:
+  F 6: B=Razón Social | D=valor
+  F 7: B=RUT | D=valor
+  F11: B=Rep Legal Nombre | F=valor
+  F21: B=Nombre Proyecto | E=valor
+  F27: B=Coordenadas | E=Huso, F=Zona, G=Label(Este), H=Valor(Este)
+```
+
+**⚠️ Variaciones en archivos descargados**:
+- Template oficial: 71 filas × 31 columnas
+- Archivos llenados: 49 filas × 12 columnas (empresas eliminan filas/columnas vacías)
+- El parser usa referencias de celda absolutas (F6:D4, F21:E5) en vez de dimensiones
+
+#### 2. Integración con Repositorio
+
+**Método actualizado**: `CENDatabaseManager.parse_and_store_sac_document()`
+
+**Parámetros**:
+```python
+def parse_and_store_sac_document(
+    self,
+    documento_id: int,
+    solicitud_id: int,
+    local_path: str,
+    formato_archivo: str = "PDF",  # ← Nuevo parámetro
+    parser_version: str = "1.0.0"
+) -> bool:
+```
+
+**Lógica**:
+```python
+if formato_archivo == "PDF":
+    from src.parsers.pdf_sac import parse_sac_pdf
+    parsed_data = parse_sac_pdf(local_path)
+elif formato_archivo in ("XLSX", "XLS"):
+    from src.parsers.xlsx_sac import SACXLSXParser
+    parser = SACXLSXParser()
+    parsed_data = parser.parse(local_path)
+```
+
+**Normalización de campos**: El XLSX parser mapea sus campos internos a los mismos nombres que usa el PDF parser:
+
+| Campo XLSX interno      | Campo normalizado (DB)              |
+|------------------------|-------------------------------------|
+| `domicilio`            | `domicilio_legal`                   |
+| `proyecto_nombre`      | `nombre_proyecto`                   |
+| `subestacion_nombre`   | `nombre_subestacion`                |
+| `coordinador1_nombre`  | `coordinador_proyecto_1_nombre`     |
+| `utm_huso`             | `proyecto_coordenadas_utm_huso`     |
+
+#### 3. Metadata
+
+**Diferencia con PDF**:
+- ✅ PDF tiene metadata (Producer, Author, Title, CreationDate) → extraída y guardada
+- ❌ XLSX NO tiene metadata equivalente → campos NULL en BD
+
+#### 4. Uso del Sistema
+
+**Parsear un XLSX manualmente**:
+```bash
+uv run python -m src.parsers.xlsx_sac downloads/1068/Formulario-SAC.xlsx
+```
+
+**Parsear y guardar en BD**:
+```python
+from src.repositories.cen import get_cen_db_manager
+
+db = get_cen_db_manager()
+
+success = db.parse_and_store_sac_document(
+    documento_id=15824,
+    solicitud_id=1068,
+    local_path="downloads/1068/Formulario-SAC.xlsx",
+    formato_archivo="XLSX"
+)
+```
+
+**Resultado en BD**:
+```sql
+-- formularios_parseados
+id | documento_id | tipo_formulario | formato_archivo | parsing_exitoso
+ 2 | 15824        | SAC             | XLSX            | 1
+
+-- formularios_sac_parsed
+razon_social: COMPAÑÍA GENERAL DE ELECTRICIDAD S.A
+rut: 76.411.321-7
+nombre_proyecto: Alimentador Yobilo
+tipo_proyecto: Consumo
+fecha_estimada_construccion: 2021-12-01
+fecha_estimada_interconexion: 2022-03-01
+```
+
+#### 5. Limitaciones Conocidas
+
+1. **Campos opcionales no capturados**:
+   - `representante_legal_telefono` (no visible en estructura actual)
+   - `tecnologia` (no presente en template XLSX analizado)
+   - `coordinador_proyecto_3_*` (template solo tiene 2 coordinadores visibles)
+
+2. **Coordenada Norte**:
+   - Solo se captura Este en F27:H27
+   - Norte podría estar en merged cell o fila adicional
+   - Queda NULL si no está presente
+
+3. **Variaciones de template**:
+   - Las empresas pueden modificar el template antes de llenar
+   - El parser es robusto a cambios de dimensiones (usa refs absolutas)
+   - Cambios en posición de celdas requerirán actualización del parser
+
+#### 6. Estadísticas de Uso
+
+**Datos actuales (2025)**:
+- Total documentos SAC: 2,290
+- Formato PDF: 2,289 (99.96%)
+- Formato XLSX: 1 (0.04%)
+
+**Conclusión**: El parseo XLSX cubre un caso marginal pero importante (empresas que no convierten a PDF).
+
+#### 7. Testing
+
+**Archivo de prueba**:
+- Template oficial: `forms/2504-FORM-SAC-V1.xlsx` (vacío)
+- Archivo llenado: `downloads/1068/Formulario-de-solicitud-y-antecedentes-SAC.xlsx`
+
+**Test end-to-end**:
+```bash
+# Parsear XLSX y guardar en BD
+DB_HOST=localhost uv run python -c "
+from src.repositories.cen import get_cen_db_manager
+db = get_cen_db_manager()
+success = db.parse_and_store_sac_document(
+    documento_id=15824,
+    solicitud_id=1068,
+    local_path='downloads/1068/Formulario-de-solicitud-y-antecedentes-SAC.xlsx',
+    formato_archivo='XLSX'
+)
+print(f'✅ Success: {success}')
+"
+```
+
+#### 8. Próximos Pasos
+
+- [ ] Implementar parser XLSX para SUCTD (estructura similar a SAC)
+- [ ] Implementar parser XLSX para Proyecto Fehaciente (si existen muestras)
+- [ ] Mejorar captura de coordenada Norte
+- [ ] Agregar validación de estructura de template
+
+---
+
 **Última actualización**: 2025-10-20
-**Autor**: Equipo Antumanque / Claude
-**Versión**: 1.0.0
+**Autor**: Equipo Antumanque
+**Versión**: 1.1.0 (+ XLSX Parsing)

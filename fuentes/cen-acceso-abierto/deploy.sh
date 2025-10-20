@@ -42,6 +42,7 @@ fi
 # Parsear argumentos
 ONLY_MIGRATIONS=false
 SHOW_STATUS=false
+FORCE_FRESH=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -53,9 +54,13 @@ while [[ $# -gt 0 ]]; do
             SHOW_STATUS=true
             shift
             ;;
+        --fresh)
+            FORCE_FRESH=true
+            shift
+            ;;
         *)
             log_error "Argumento desconocido: $1"
-            echo "Uso: $0 [--migrations] [--status]"
+            echo "Uso: $0 [--migrations] [--status] [--fresh]"
             exit 1
             ;;
     esac
@@ -128,8 +133,22 @@ echo ""
 # Paso 3: Setup de base de datos (auto-detecta fresh install vs migraciones)
 log_info "Paso 3/4: Configurando base de datos..."
 
-# Auto-setup: detecta si es fresh install o solo migraciones
-uv run python db/setup.py
+# Forzar fresh install si se especificó --fresh
+if [ "$FORCE_FRESH" = true ]; then
+    log_warn "Forzando FRESH INSTALL completo (--fresh)"
+    log_warn "⚠️  ADVERTENCIA: Esto recreará TODAS las tablas"
+    read -p "¿Estás seguro? Esto BORRARÁ todos los datos existentes (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_error "Deployment cancelado"
+        exit 1
+    fi
+
+    uv run python db/setup.py --fresh
+else
+    # Auto-setup: detecta si es fresh install o solo migraciones
+    uv run python db/setup.py
+fi
 
 if [ $? -eq 0 ]; then
     log_info "Base de datos configurada correctamente"
@@ -171,8 +190,14 @@ echo "🎉 DEPLOYMENT COMPLETADO EXITOSAMENTE"
 echo "========================================================================"
 echo ""
 echo "Próximos pasos:"
-echo "  1. Verificar logs: tail -f /var/log/cen-ingestion.log"
-echo "  2. Ver estado de migraciones: ./deploy.sh --status"
+echo "  1. Ejecutar extracción completa: python -m src.main"
+echo "  2. Verificar logs: tail -f /var/log/cen-ingestion.log"
+echo "  3. Ver estado de migraciones: ./deploy.sh --status"
+echo ""
+echo "Opciones de deployment:"
+echo "  ./deploy.sh              # Auto-detecta fresh install vs migraciones"
+echo "  ./deploy.sh --fresh      # Forzar recreación completa de BD"
+echo "  ./deploy.sh --status     # Ver estado sin ejecutar"
 echo ""
 
 exit 0
