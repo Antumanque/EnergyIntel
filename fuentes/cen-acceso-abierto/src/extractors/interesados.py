@@ -150,28 +150,21 @@ class InteresadosExtractor:
             # No fallar todo el proceso si falla la transformación
             # Los datos raw ya están guardados de forma segura
 
-    def process_all_urls(self) -> None:
+    def process_interesados_endpoint(self) -> None:
         """
-        Procesa todas las URLs configuradas de forma secuencial.
+        Procesa el endpoint /interesados del CEN.
 
-        Este método obtiene y almacena datos de cada URL en la configuración.
-        Los errores de URLs individuales no detienen el proceso general.
+        Construye la URL usando CEN_API_BASE_URL + "/interesados".
         """
-        urls = self.settings.api_urls
+        # Construir URL del endpoint interesados
+        url = f"{self.settings.cen_api_base_url}/interesados"
 
-        if not urls:
-            logger.warning(
-                "No API URLs configured. Please set API_URL_1, API_URL_2, etc."
-            )
-            return
+        logger.info(f"Procesando endpoint: {url}")
 
-        logger.info(f"Processing {len(urls)} URL(s)...")
+        result = self.fetch_and_store_url(url)
+        self.results[url] = result
 
-        for url in urls:
-            result = self.fetch_and_store_url(url)
-            self.results[url] = result
-
-        logger.info("All URLs processed")
+        logger.info("Endpoint interesados procesado")
 
     def print_summary(self) -> None:
         """
@@ -226,8 +219,8 @@ class InteresadosExtractor:
             # Paso 1: Configurar base de datos
             self.setup_database()
 
-            # Paso 2: Procesar todas las URLs
-            self.process_all_urls()
+            # Paso 2: Procesar endpoint /interesados
+            self.process_interesados_endpoint()
 
             # Paso 3: Imprimir resumen
             self.print_summary()
@@ -237,10 +230,10 @@ class InteresadosExtractor:
                 logger.warning("No data was processed")
                 return 1
 
-            # Salir con error si TODAS las peticiones fallaron
+            # Salir con error si la petición falló
             all_failed = all(not r["success"] for r in self.results.values())
             if all_failed:
-                logger.error("All requests failed")
+                logger.error("Interesados request failed")
                 return 1
 
             logger.info("Interesados extraction completed successfully")

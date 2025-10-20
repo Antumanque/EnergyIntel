@@ -32,13 +32,15 @@ A reusable Python-based data ingestion template for consuming REST APIs from pub
    cp .env.example .env
    ```
 
-3. **Configure your API URLs**
+3. **Configure CEN API settings** (optional)
 
-   Edit `.env` and add your API endpoints (one per line):
+   The `.env` file is pre-configured for CEN Acceso Abierto. Optionally adjust:
    ```env
-   API_URL_1=https://www.coordinador.cl/api/endpoint1
-   API_URL_2=https://www.coordinador.cl/api/endpoint2
-   API_URL_3=https://www.coordinador.cl/api/endpoint3
+   # Years to extract (comma-separated)
+   CEN_YEARS=2025
+
+   # Or for production, extract all available years:
+   CEN_YEARS=2020,2021,2022,2023,2024,2025
    ```
 
 4. **Start the database**
@@ -136,7 +138,9 @@ All configuration is done via environment variables in `.env`:
 | `DB_USER` | Database username | `cen_user` |
 | `DB_PASSWORD` | Database password | `cen_password` |
 | `DB_NAME` | Database name | `cen_acceso_abierto` |
-| `API_URL_1`, `API_URL_2`, etc. | API endpoints (numbered list) | (empty) |
+| `CEN_API_BASE_URL` | CEN Public API base URL | `https://pkb3ax2pkg...` |
+| `CEN_YEARS` | Years to extract (comma-separated) | `2025` |
+| `CEN_DOCUMENT_TYPES` | Document types to filter | `Formulario SUCTD,...` |
 | `REQUEST_TIMEOUT` | HTTP timeout in seconds | `30` |
 | `MAX_RETRIES` | Max retry attempts | `3` |
 
@@ -199,8 +203,8 @@ For production deployment on the Antumanque server:
 
 ### No Data Fetched
 
-- Check that `API_URL_1` (and others) are set in `.env`
-- Verify API endpoints are accessible: `curl <API_URL>`
+- Verify CEN API configuration in `.env` (`CEN_API_BASE_URL`, `CEN_YEARS`)
+- Test API accessibility: `curl "https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo=6&anio=2025&tipo_solicitud_id=0&solicitud_id=null"`
 - Check application logs for error messages
 
 ### API Request Timeout
@@ -211,12 +215,12 @@ For production deployment on the Antumanque server:
 
 ## Future Extensions
 
-This template is designed to be extended for:
+This template can be extended for:
 
 - **Web Scraping**: Add `src/scraper.py` with BeautifulSoup/Playwright
 - **PDF Parsing**: Add `src/pdf_parser.py` with PyPDF2/pdfplumber
-- **Data Transformation**: Add `src/transformers.py` for processing
-- **Multiple Sources**: Simply add more URLs to `API_URLS`
+- **New CEN Endpoints**: Create new extractors in `src/extractors/` following the existing pattern
+- **Data Transformation**: Add parsers in `src/parsers/` for custom transformations
 
 ## License
 

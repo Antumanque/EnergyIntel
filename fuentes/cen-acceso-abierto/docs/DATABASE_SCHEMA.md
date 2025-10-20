@@ -430,15 +430,15 @@ PASO 4: Extracción de documentos
 **Base URL**: `https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public`
 
 **Qué hace**:
-El orquestador ejecuta los extractores configurados en tu `.env`:
+El orquestador ejecuta SIEMPRE ambos extractores:
 
-1. **Extractor de Interesados** (si `API_URL_1` está configurado):
-   - Extrae datos del endpoint `/interesados`
+1. **Extractor de Interesados**:
+   - Extrae datos del endpoint `/interesados` (usando `CEN_API_BASE_URL + "/interesados"`)
    - Guarda respuesta cruda en `raw_api_data`
    - Parsea y normaliza datos en `interesados`
 
-2. **Extractor de Solicitudes y Documentos** (si `CEN_YEARS` está configurado):
-   - Extrae solicitudes por año usando parámetro `tipo=6`
+2. **Extractor de Solicitudes y Documentos**:
+   - Extrae solicitudes por año usando parámetro `tipo=6` (años configurados en `CEN_YEARS`)
    - Guarda solicitudes en tabla `solicitudes`
    - Para cada solicitud, extrae documentos usando parámetro `tipo=11`
    - Filtra solo documentos importantes (SUCTD, SAC, Formulario_proyecto_fehaciente)
@@ -448,19 +448,16 @@ El orquestador ejecuta los extractores configurados en tu `.env`:
 **Comando**:
 ```bash
 # Configurar en .env:
-# API_URL_1=https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public/interesados
 # CEN_API_BASE_URL=https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public
 # CEN_YEARS=2024,2025
 # CEN_DOCUMENT_TYPES=Formulario SUCTD,Formulario SAC,Formulario_proyecto_fehaciente
 
-# Ejecuta TODOS los extractors configurados:
+# Ejecuta extracción completa (interesados + solicitudes + documentos):
 uv run python -m src.main
 
 # O con Docker:
 docker-compose run --rm cen_app
 ```
-
-**Nota**: El orquestador detecta automáticamente qué extractors ejecutar basándose en las variables de entorno configuradas. Si no hay `API_URL_1`, salta interesados. Si no hay `CEN_YEARS`, salta solicitudes.
 
 ---
 

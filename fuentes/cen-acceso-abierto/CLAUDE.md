@@ -180,7 +180,7 @@ docker-compose exec cen_db mysql -u cen_user -pcen_password cen_acceso_abierto
 docker-compose logs -f cen_db
 
 # Run app with custom environment
-docker-compose run --rm -e API_URL_1="https://example.com/api" cen_app
+docker-compose run --rm -e CEN_YEARS="2024,2025" cen_app
 ```
 
 ## Development vs Production
@@ -294,17 +294,14 @@ Located in `src/database.py` → `insert_interesados_bulk()`:
 
 ## Adding New Data Sources
 
-To add new API endpoints:
+The system is configured for CEN Acceso Abierto API. To add new endpoints from the same API:
 
-1. **Simple**: Just add numbered URLs to `.env`:
-   ```env
-   API_URL_1=https://www.coordinador.cl/api/endpoint1
-   API_URL_2=https://www.coordinador.cl/api/endpoint2
-   API_URL_3=https://www.coordinador.cl/api/endpoint3
-   ```
+1. **Create a new extractor** in `src/extractors/` following the existing pattern
+2. **Add parser logic** in `src/parsers/` for data transformation
+3. **Update main.py** to include the new extractor in the orchestration flow
+4. **Extend database schema** if new tables are needed
 
-2. **No code changes needed** - The system processes all URLs identically
-3. **Easy to manage** - Each URL on its own line for clarity
+The base URL (`CEN_API_BASE_URL`) is shared across all CEN endpoints.
 
 ## Extending the Template
 
@@ -371,7 +368,7 @@ docker run \
   -e DB_HOST=production.db.host \
   -e DB_USER=prod_user \
   -e DB_PASSWORD=secure_pass \
-  -e API_URLS="https://api.example.com/v1/data" \
+  -e CEN_YEARS="2020,2021,2022,2023,2024,2025" \
   cen-acceso-abierto:latest
 ```
 
@@ -399,9 +396,9 @@ docker-compose logs cen_db  # Check for errors
 ```
 
 ### No Data Being Fetched
-Verify API URLs are set:
+Verify CEN API configuration:
 ```bash
-docker-compose run --rm cen_app python -c "from src.settings import get_settings; print(get_settings().api_urls)"
+docker-compose run --rm cen_app python -c "from src.settings import get_settings; s = get_settings(); print(f'API: {s.cen_api_base_url}'); print(f'Years: {s.cen_years_list}')"
 ```
 
 ## Project Files Reference

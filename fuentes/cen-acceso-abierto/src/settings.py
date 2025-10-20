@@ -5,10 +5,9 @@ Este módulo carga toda la configuración de variables de entorno y provee
 acceso type-safe a configuraciones en toda la aplicación.
 """
 
-import os
 from typing import List
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -66,12 +65,6 @@ class Settings(BaseSettings):
             return [d.strip() for d in self.cen_document_types.split(',') if d.strip()]
         return ["Formulario SUCTD", "Formulario SAC", "Formulario_proyecto_fehaciente"]
 
-    # API configuration (used by main.py for /interesados endpoint)
-    api_urls: List[str] = Field(
-        default_factory=list,
-        description="List of API URLs to fetch (use API_URL_1, API_URL_2, etc.)",
-    )
-
     # HTTP client configuration
     request_timeout: int = Field(
         default=30, description="HTTP request timeout in seconds"
@@ -79,37 +72,6 @@ class Settings(BaseSettings):
     max_retries: int = Field(
         default=3, description="Maximum number of retry attempts for failed requests"
     )
-
-    @field_validator("api_urls", mode="before")
-    @classmethod
-    def parse_api_urls(cls, v: str | List[str]) -> List[str]:
-        """
-        Parsea URLs de API desde variables de entorno numeradas.
-
-        Busca API_URL_1, API_URL_2, API_URL_3, etc. en el entorno.
-        También soporta string separado por comas para compatibilidad.
-        """
-        # Primero, intentar cargar desde variables de entorno numeradas
-        urls = []
-        i = 1
-        while True:
-            url = os.getenv(f"API_URL_{i}")
-            if url:
-                urls.append(url.strip())
-                i += 1
-            else:
-                break
-
-        # Si encontramos URLs numeradas, retornar esas
-        if urls:
-            return urls
-
-        # De lo contrario, parsear el valor pasado
-        if isinstance(v, str):
-            # Dividir por coma y quitar espacios
-            urls = [url.strip() for url in v.split(",") if url.strip()]
-            return urls
-        return v if v else []
 
     @property
     def database_url(self) -> str:
