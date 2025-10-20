@@ -120,6 +120,11 @@ class DatabaseSetup:
                 if statement.strip():
                     try:
                         cursor.execute(statement)
+                        # Consumir resultados si los hay (para evitar "Unread result found")
+                        try:
+                            cursor.fetchall()
+                        except:
+                            pass  # No hay resultados, está bien
                     except Error as e:
                         # Ignorar errores de "already exists"
                         if "already exists" not in str(e).lower():
