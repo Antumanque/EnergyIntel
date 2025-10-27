@@ -2,11 +2,15 @@
 """
 Orquestador principal de extracción COMPLETA de datos del CEN.
 
-Este script ejecuta SIEMPRE la extracción completa en 4 pasos:
+Este script ejecuta SIEMPRE la extracción completa en 8 pasos:
 1. Interesados (stakeholders)
 2. Solicitudes (proyectos) + Metadata de documentos
 3. Descarga masiva de formularios SAC (PDFs/XLSX)
 4. Parseo masivo de formularios SAC descargados
+5. Descarga masiva de formularios SUCTD (PDFs/XLSX)
+6. Parseo masivo de formularios SUCTD descargados
+7. Descarga masiva de formularios Fehaciente (PDFs/XLSX)
+8. Parseo masivo de formularios Fehaciente descargados
 
 NO contiene lógica de negocio, solo orquesta los extractors.
 
@@ -26,6 +30,10 @@ import sys
 
 from src.batch_download_sac import SACBatchDownloader
 from src.batch_parse_sac import SACBatchParser
+from src.batch_download_suctd import SUCTDBatchDownloader
+from src.batch_parse_suctd import SUCTDBatchParser
+from src.batch_download_fehaciente import FehacienteBatchDownloader
+from src.batch_parse_fehaciente import FehacienteBatchParser
 from src.extractors.interesados import get_interesados_extractor
 from src.extractors.solicitudes import get_solicitudes_extractor
 from src.settings import get_settings
@@ -48,6 +56,10 @@ def main() -> int:
     2. Solicitudes (proyectos eléctricos por año) + Metadata de documentos
     3. Descarga masiva de formularios SAC (PDFs/XLSX)
     4. Parseo masivo de formularios SAC descargados
+    5. Descarga masiva de formularios SUCTD (PDFs/XLSX)
+    6. Parseo masivo de formularios SUCTD descargados
+    7. Descarga masiva de formularios Fehaciente (PDFs/XLSX)
+    8. Parseo masivo de formularios Fehaciente descargados
 
     Returns:
         Código de salida (0 = éxito, 1 = error)
@@ -117,21 +129,100 @@ def main() -> int:
             if parse_stats["fallidos"] > parse_stats["exitosos"]:
                 exit_code = 1
 
+        # PASO 5: Descarga masiva de formularios SUCTD (SIEMPRE)
+        logger.info("\n" + "=" * 70)
+        logger.info("PASO 5: DESCARGA MASIVA DE FORMULARIOS SUCTD")
+        logger.info("=" * 70)
+
+        suctd_downloader = SUCTDBatchDownloader()
+        suctd_download_stats = suctd_downloader.run_batch_download()
+
+        if suctd_download_stats["fallidos"] > 0:
+            logger.warning(
+                f"⚠️ Descarga SUCTD completada con {suctd_download_stats['fallidos']} errores de {suctd_download_stats['total']}"
+            )
+            if suctd_download_stats["fallidos"] > suctd_download_stats["exitosos"]:
+                exit_code = 1
+
+        # PASO 6: Parseo masivo de formularios SUCTD (SIEMPRE)
+        logger.info("\n" + "=" * 70)
+        logger.info("PASO 6: PARSEO MASIVO DE FORMULARIOS SUCTD")
+        logger.info("=" * 70)
+
+        suctd_parser = SUCTDBatchParser()
+        suctd_parse_stats = suctd_parser.run_batch_parsing()
+
+        if suctd_parse_stats["fallidos"] > 0:
+            logger.warning(
+                f"⚠️ Parseo SUCTD completado con {suctd_parse_stats['fallidos']} errores de {suctd_parse_stats['total']}"
+            )
+            if suctd_parse_stats["fallidos"] > suctd_parse_stats["exitosos"]:
+                exit_code = 1
+
+        # PASO 7: Descarga masiva de formularios Fehaciente (SIEMPRE)
+        logger.info("\n" + "=" * 70)
+        logger.info("PASO 7: DESCARGA MASIVA DE FORMULARIOS FEHACIENTE")
+        logger.info("=" * 70)
+
+        fehaciente_downloader = FehacienteBatchDownloader()
+        fehaciente_download_stats = fehaciente_downloader.run_batch_download()
+
+        if fehaciente_download_stats["fallidos"] > 0:
+            logger.warning(
+                f"⚠️ Descarga Fehaciente completada con {fehaciente_download_stats['fallidos']} errores de {fehaciente_download_stats['total']}"
+            )
+            if fehaciente_download_stats["fallidos"] > fehaciente_download_stats["exitosos"]:
+                exit_code = 1
+
+        # PASO 8: Parseo masivo de formularios Fehaciente (SIEMPRE)
+        logger.info("\n" + "=" * 70)
+        logger.info("PASO 8: PARSEO MASIVO DE FORMULARIOS FEHACIENTE")
+        logger.info("=" * 70)
+
+        fehaciente_parser = FehacienteBatchParser()
+        fehaciente_parse_stats = fehaciente_parser.run_batch_parsing()
+
+        if fehaciente_parse_stats["fallidos"] > 0:
+            logger.warning(
+                f"⚠️ Parseo Fehaciente completado con {fehaciente_parse_stats['fallidos']} errores de {fehaciente_parse_stats['total']}"
+            )
+            if fehaciente_parse_stats["fallidos"] > fehaciente_parse_stats["exitosos"]:
+                exit_code = 1
+
         # Resumen final
         logger.info("\n" + "=" * 70)
         logger.info("📊 RESUMEN FINAL DE EJECUCIÓN")
         logger.info("=" * 70)
         logger.info("")
-        logger.info("PASO 3 - Descarga de formularios:")
-        logger.info(f"  Total documentos:     {download_stats['total']}")
-        logger.info(f"  ✅ Descargados:       {download_stats['exitosos']}")
-        logger.info(f"  ❌ Fallidos:          {download_stats['fallidos']}")
-        logger.info(f"  📁 Ya descargados:    {download_stats.get('ya_descargados', 0)}")
+        logger.info("PASO 3 - Descarga SAC:")
+        logger.info(f"  Total:        {download_stats['total']}")
+        logger.info(f"  ✅ Exitosos:  {download_stats['exitosos']}")
+        logger.info(f"  ❌ Fallidos:  {download_stats['fallidos']}")
         logger.info("")
-        logger.info("PASO 4 - Parseo de formularios:")
-        logger.info(f"  Total documentos:     {parse_stats['total']}")
-        logger.info(f"  ✅ Parseados:         {parse_stats['exitosos']}")
-        logger.info(f"  ❌ Fallidos:          {parse_stats['fallidos']}")
+        logger.info("PASO 4 - Parseo SAC:")
+        logger.info(f"  Total:        {parse_stats['total']}")
+        logger.info(f"  ✅ Exitosos:  {parse_stats['exitosos']}")
+        logger.info(f"  ❌ Fallidos:  {parse_stats['fallidos']}")
+        logger.info("")
+        logger.info("PASO 5 - Descarga SUCTD:")
+        logger.info(f"  Total:        {suctd_download_stats['total']}")
+        logger.info(f"  ✅ Exitosos:  {suctd_download_stats['exitosos']}")
+        logger.info(f"  ❌ Fallidos:  {suctd_download_stats['fallidos']}")
+        logger.info("")
+        logger.info("PASO 6 - Parseo SUCTD:")
+        logger.info(f"  Total:        {suctd_parse_stats['total']}")
+        logger.info(f"  ✅ Exitosos:  {suctd_parse_stats['exitosos']}")
+        logger.info(f"  ❌ Fallidos:  {suctd_parse_stats['fallidos']}")
+        logger.info("")
+        logger.info("PASO 7 - Descarga Fehaciente:")
+        logger.info(f"  Total:        {fehaciente_download_stats['total']}")
+        logger.info(f"  ✅ Exitosos:  {fehaciente_download_stats['exitosos']}")
+        logger.info(f"  ❌ Fallidos:  {fehaciente_download_stats['fallidos']}")
+        logger.info("")
+        logger.info("PASO 8 - Parseo Fehaciente:")
+        logger.info(f"  Total:        {fehaciente_parse_stats['total']}")
+        logger.info(f"  ✅ Exitosos:  {fehaciente_parse_stats['exitosos']}")
+        logger.info(f"  ❌ Fallidos:  {fehaciente_parse_stats['fallidos']}")
         logger.info("")
 
         if exit_code == 0:

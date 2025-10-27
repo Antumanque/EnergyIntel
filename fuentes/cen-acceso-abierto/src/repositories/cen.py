@@ -934,6 +934,566 @@ class CENDatabaseManager:
             return False
 
 
+    def parse_and_store_suctd_document(
+        self,
+        documento_id: int,
+        solicitud_id: int,
+        local_path: str,
+        formato_archivo: str = "PDF",
+        parser_version: str = "1.0.0"
+    ) -> bool:
+        """
+        Parsea un documento SUCTD (PDF o XLSX) y guarda los datos en una TRANSACCIÓN.
+
+        Este es el método de alto nivel que orquesta todo el proceso:
+        1. Parsea el archivo con SUCTDPDFParser o SUCTDXLSXParser (según formato)
+        2. Valida campos mínimos
+        3. Inserta en formularios_parseados + formularios_suctd_parsed en UNA transacción
+        4. Si algo falla, hace rollback automático
+
+        Args:
+            documento_id: ID del documento a parsear
+            solicitud_id: ID de la solicitud asociada
+            local_path: Ruta local del archivo (PDF o XLSX)
+            formato_archivo: Formato del archivo ("PDF" o "XLSX", default: "PDF")
+            parser_version: Versión del parser (default: "1.0.0")
+
+        Returns:
+            True si el parsing y storage fue exitoso, False en caso contrario
+        """
+        from pathlib import Path
+
+        try:
+            # Paso 1: Parsear el archivo (PDF o XLSX)
+            logger.info(f"📄 Parseando documento SUCTD {documento_id} ({formato_archivo}): {local_path}")
+
+            # Detectar formato y parsear
+            if formato_archivo == "PDF":
+                from src.parsers.pdf_suctd import parse_suctd_pdf
+                parsed_data = parse_suctd_pdf(local_path)
+            elif formato_archivo in ("XLSX", "XLS"):
+                from src.parsers.xlsx_suctd import SUCTDXLSXParser
+                parser = SUCTDXLSXParser()
+                parsed_data = parser.parse(local_path)
+            else:
+                raise ValueError(f"Formato no soportado: {formato_archivo}")
+
+            # Paso 2: Validar campos mínimos
+            required_fields = ["razon_social", "rut", "nombre_proyecto"]
+            missing_fields = [f for f in required_fields if not parsed_data.get(f)]
+
+            if missing_fields:
+                error_msg = f"Campos críticos faltantes: {', '.join(missing_fields)}"
+                logger.warning(f"⚠️  {error_msg}")
+
+                # Registrar parsing FALLIDO
+                self.insert_formulario_parseado(
+                    documento_id=documento_id,
+                    tipo_formulario="SUCTD",
+                    formato_archivo=formato_archivo,
+                    parsing_exitoso=False,
+                    parser_version=parser_version,
+                    parsing_error=error_msg
+                )
+                return False
+
+            # Paso 3: Insertar en ambas tablas (TRANSACCIÓN)
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                try:
+                    # 3.1: Insertar tracking en formularios_parseados (con metadata)
+                    cursor.execute("""
+                        INSERT INTO formularios_parseados (
+                            documento_id, tipo_formulario, formato_archivo,
+                            parsing_exitoso, parser_version,
+                            pdf_producer, pdf_author, pdf_title, pdf_creation_date,
+                            parsed_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON DUPLICATE KEY UPDATE
+                            parsing_exitoso = VALUES(parsing_exitoso),
+                            parser_version = VALUES(parser_version),
+                            pdf_producer = VALUES(pdf_producer),
+                            pdf_author = VALUES(pdf_author),
+                            pdf_title = VALUES(pdf_title),
+                            pdf_creation_date = VALUES(pdf_creation_date),
+                            parsed_at = NOW()
+                    """, (
+                        documento_id, "SUCTD", formato_archivo, True, parser_version,
+                        parsed_data.get('pdf_producer'),
+                        parsed_data.get('pdf_author'),
+                        parsed_data.get('pdf_title'),
+                        parsed_data.get('pdf_creation_date')
+                    ))
+
+                    formulario_parseado_id = cursor.lastrowid
+
+                    # 3.2: Insertar datos parseados en formularios_suctd_parsed
+                    cursor.execute("""
+                        INSERT INTO formularios_suctd_parsed (
+                            formulario_parseado_id, documento_id, solicitud_id,
+                            razon_social, rut, domicilio_legal,
+                            representante_legal_nombre, representante_legal_email, representante_legal_telefono,
+                            coordinador_proyecto_1_nombre, coordinador_proyecto_1_email, coordinador_proyecto_1_telefono,
+                            coordinador_proyecto_2_nombre, coordinador_proyecto_2_email, coordinador_proyecto_2_telefono,
+                            nombre_proyecto, tipo_proyecto, tipo_tecnologia,
+                            potencia_neta_inyeccion_mw, potencia_neta_retiro_mw,
+                            factor_potencia_nominal, modo_operacion_inversores,
+                            componente_generacion, componente_generacion_potencia_mw,
+                            componente_almacenamiento, componente_almacenamiento_potencia_mw,
+                            componente_almacenamiento_energia_mwh, componente_almacenamiento_horas,
+                            proyecto_coordenadas_utm_huso, proyecto_coordenadas_utm_este, proyecto_coordenadas_utm_norte,
+                            proyecto_comuna, proyecto_region,
+                            nombre_se_o_linea, tipo_conexion,
+                            seccionamiento_distancia_km, seccionamiento_se_cercana,
+                            nivel_tension_kv, pano_o_estructura,
+                            fecha_estimada_construccion, fecha_estimada_operacion,
+                            conexion_coordenadas_utm_huso, conexion_coordenadas_utm_este, conexion_coordenadas_utm_norte,
+                            conexion_comuna, conexion_region,
+                            informacion_adicional,
+                            created_at
+                        ) VALUES (
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s,
+                            NOW()
+                        )
+                        ON DUPLICATE KEY UPDATE
+                            razon_social = VALUES(razon_social),
+                            rut = VALUES(rut),
+                            domicilio_legal = VALUES(domicilio_legal),
+                            representante_legal_nombre = VALUES(representante_legal_nombre),
+                            representante_legal_email = VALUES(representante_legal_email),
+                            representante_legal_telefono = VALUES(representante_legal_telefono),
+                            coordinador_proyecto_1_nombre = VALUES(coordinador_proyecto_1_nombre),
+                            coordinador_proyecto_1_email = VALUES(coordinador_proyecto_1_email),
+                            coordinador_proyecto_1_telefono = VALUES(coordinador_proyecto_1_telefono),
+                            coordinador_proyecto_2_nombre = VALUES(coordinador_proyecto_2_nombre),
+                            coordinador_proyecto_2_email = VALUES(coordinador_proyecto_2_email),
+                            coordinador_proyecto_2_telefono = VALUES(coordinador_proyecto_2_telefono),
+                            nombre_proyecto = VALUES(nombre_proyecto),
+                            tipo_proyecto = VALUES(tipo_proyecto),
+                            tipo_tecnologia = VALUES(tipo_tecnologia),
+                            potencia_neta_inyeccion_mw = VALUES(potencia_neta_inyeccion_mw),
+                            potencia_neta_retiro_mw = VALUES(potencia_neta_retiro_mw),
+                            factor_potencia_nominal = VALUES(factor_potencia_nominal),
+                            modo_operacion_inversores = VALUES(modo_operacion_inversores),
+                            componente_generacion = VALUES(componente_generacion),
+                            componente_generacion_potencia_mw = VALUES(componente_generacion_potencia_mw),
+                            componente_almacenamiento = VALUES(componente_almacenamiento),
+                            componente_almacenamiento_potencia_mw = VALUES(componente_almacenamiento_potencia_mw),
+                            componente_almacenamiento_energia_mwh = VALUES(componente_almacenamiento_energia_mwh),
+                            componente_almacenamiento_horas = VALUES(componente_almacenamiento_horas),
+                            proyecto_coordenadas_utm_huso = VALUES(proyecto_coordenadas_utm_huso),
+                            proyecto_coordenadas_utm_este = VALUES(proyecto_coordenadas_utm_este),
+                            proyecto_coordenadas_utm_norte = VALUES(proyecto_coordenadas_utm_norte),
+                            proyecto_comuna = VALUES(proyecto_comuna),
+                            proyecto_region = VALUES(proyecto_region),
+                            nombre_se_o_linea = VALUES(nombre_se_o_linea),
+                            tipo_conexion = VALUES(tipo_conexion),
+                            seccionamiento_distancia_km = VALUES(seccionamiento_distancia_km),
+                            seccionamiento_se_cercana = VALUES(seccionamiento_se_cercana),
+                            nivel_tension_kv = VALUES(nivel_tension_kv),
+                            pano_o_estructura = VALUES(pano_o_estructura),
+                            fecha_estimada_construccion = VALUES(fecha_estimada_construccion),
+                            fecha_estimada_operacion = VALUES(fecha_estimada_operacion),
+                            conexion_coordenadas_utm_huso = VALUES(conexion_coordenadas_utm_huso),
+                            conexion_coordenadas_utm_este = VALUES(conexion_coordenadas_utm_este),
+                            conexion_coordenadas_utm_norte = VALUES(conexion_coordenadas_utm_norte),
+                            conexion_comuna = VALUES(conexion_comuna),
+                            conexion_region = VALUES(conexion_region),
+                            informacion_adicional = VALUES(informacion_adicional)
+                    """, (
+                        formulario_parseado_id, documento_id, solicitud_id,
+                        # Antecedentes de la Empresa Solicitante
+                        parsed_data.get("razon_social"),
+                        parsed_data.get("rut"),
+                        parsed_data.get("domicilio_legal"),
+                        # Contacto de Representante Legal
+                        parsed_data.get("representante_legal_nombre"),
+                        parsed_data.get("representante_legal_email"),
+                        parsed_data.get("representante_legal_telefono"),
+                        # Coordinadores de Proyectos
+                        parsed_data.get("coordinador_proyecto_1_nombre"),
+                        parsed_data.get("coordinador_proyecto_1_email"),
+                        parsed_data.get("coordinador_proyecto_1_telefono"),
+                        parsed_data.get("coordinador_proyecto_2_nombre"),
+                        parsed_data.get("coordinador_proyecto_2_email"),
+                        parsed_data.get("coordinador_proyecto_2_telefono"),
+                        # Antecedentes del Proyecto
+                        parsed_data.get("nombre_proyecto"),
+                        parsed_data.get("tipo_proyecto"),
+                        parsed_data.get("tipo_tecnologia"),
+                        parsed_data.get("potencia_neta_inyeccion_mw"),
+                        parsed_data.get("potencia_neta_retiro_mw"),
+                        parsed_data.get("factor_potencia_nominal"),
+                        parsed_data.get("modo_operacion_inversores"),
+                        # Parámetros Sistemas de Almacenamiento
+                        parsed_data.get("componente_generacion"),
+                        parsed_data.get("componente_generacion_potencia_mw"),
+                        parsed_data.get("componente_almacenamiento"),
+                        parsed_data.get("componente_almacenamiento_potencia_mw"),
+                        parsed_data.get("componente_almacenamiento_energia_mwh"),
+                        parsed_data.get("componente_almacenamiento_horas"),
+                        # Ubicación Geográfica del Proyecto
+                        parsed_data.get("proyecto_coordenadas_utm_huso"),
+                        parsed_data.get("proyecto_coordenadas_utm_este"),
+                        parsed_data.get("proyecto_coordenadas_utm_norte"),
+                        parsed_data.get("proyecto_comuna"),
+                        parsed_data.get("proyecto_region"),
+                        # Antecedentes del Punto de Conexión
+                        parsed_data.get("nombre_se_o_linea"),
+                        parsed_data.get("tipo_conexion"),
+                        parsed_data.get("seccionamiento_distancia_km"),
+                        parsed_data.get("seccionamiento_se_cercana"),
+                        parsed_data.get("nivel_tension_kv"),
+                        parsed_data.get("pano_o_estructura"),
+                        parsed_data.get("fecha_estimada_construccion"),
+                        parsed_data.get("fecha_estimada_operacion"),
+                        # Ubicación Geográfica del Punto de Conexión
+                        parsed_data.get("conexion_coordenadas_utm_huso"),
+                        parsed_data.get("conexion_coordenadas_utm_este"),
+                        parsed_data.get("conexion_coordenadas_utm_norte"),
+                        parsed_data.get("conexion_comuna"),
+                        parsed_data.get("conexion_region"),
+                        # Información Adicional
+                        parsed_data.get("informacion_adicional"),
+                    ))
+
+                    conn.commit()
+                    logger.info(f"✅ Documento SUCTD {documento_id} parseado y almacenado exitosamente")
+                    return True
+
+                except Error as e:
+                    # Rollback automático si algo falla
+                    conn.rollback()
+                    error_msg = f"Error en transacción: {str(e)}"
+                    logger.error(f"❌ {error_msg}", exc_info=True)
+
+                    # Registrar parsing FALLIDO
+                    self.insert_formulario_parseado(
+                        documento_id=documento_id,
+                        tipo_formulario="SUCTD",
+                        formato_archivo=formato_archivo,
+                        parsing_exitoso=False,
+                        parser_version=parser_version,
+                        parsing_error=error_msg
+                    )
+                    return False
+
+        except Exception as e:
+            error_msg = f"Error al parsear SUCTD: {str(e)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+
+            # Registrar parsing FALLIDO
+            self.insert_formulario_parseado(
+                documento_id=documento_id,
+                tipo_formulario="SUCTD",
+                formato_archivo=formato_archivo,
+                parsing_exitoso=False,
+                parser_version=parser_version,
+                parsing_error=error_msg
+            )
+            return False
+
+
+    def parse_and_store_fehaciente_document(
+        self,
+        documento_id: int,
+        solicitud_id: int,
+        local_path: str,
+        formato_archivo: str = "PDF",
+        parser_version: str = "1.0.0"
+    ) -> bool:
+        """
+        Parsea un documento Fehaciente (PDF o XLSX) y guarda los datos en una TRANSACCIÓN.
+
+        Este es el método de alto nivel que orquesta todo el proceso:
+        1. Parsea el archivo con FehacientePDFParser o FehacienteXLSXParser (según formato)
+        2. Valida campos mínimos
+        3. Inserta en formularios_parseados + formularios_fehaciente_parsed en UNA transacción
+        4. Si algo falla, hace rollback automático
+
+        Args:
+            documento_id: ID del documento a parsear
+            solicitud_id: ID de la solicitud asociada
+            local_path: Ruta local del archivo (PDF o XLSX)
+            formato_archivo: Formato del archivo ("PDF" o "XLSX", default: "PDF")
+            parser_version: Versión del parser (default: "1.0.0")
+
+        Returns:
+            True si el parsing y storage fue exitoso, False en caso contrario
+        """
+        from pathlib import Path
+
+        try:
+            # Paso 1: Parsear el archivo (PDF o XLSX)
+            logger.info(f"📄 Parseando documento Fehaciente {documento_id} ({formato_archivo}): {local_path}")
+
+            # Detectar formato y parsear
+            if formato_archivo == "PDF":
+                from src.parsers.pdf_fehaciente import parse_fehaciente_pdf
+                parsed_data = parse_fehaciente_pdf(local_path)
+            elif formato_archivo in ("XLSX", "XLS"):
+                from src.parsers.xlsx_fehaciente import FehacienteXLSXParser
+                parser = FehacienteXLSXParser()
+                parsed_data = parser.parse(local_path)
+            else:
+                raise ValueError(f"Formato no soportado: {formato_archivo}")
+
+            # Paso 2: Validar campos mínimos
+            required_fields = ["razon_social", "rut", "nombre_proyecto"]
+            missing_fields = [f for f in required_fields if not parsed_data.get(f)]
+
+            if missing_fields:
+                error_msg = f"Campos críticos faltantes: {', '.join(missing_fields)}"
+                logger.warning(f"⚠️  {error_msg}")
+
+                # Registrar parsing FALLIDO
+                self.insert_formulario_parseado(
+                    documento_id=documento_id,
+                    tipo_formulario="FEHACIENTE",
+                    formato_archivo=formato_archivo,
+                    parsing_exitoso=False,
+                    parser_version=parser_version,
+                    parsing_error=error_msg
+                )
+                return False
+
+            # Paso 3: Insertar en ambas tablas (TRANSACCIÓN)
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                try:
+                    # 3.1: Insertar tracking en formularios_parseados (con metadata)
+                    cursor.execute("""
+                        INSERT INTO formularios_parseados (
+                            documento_id, tipo_formulario, formato_archivo,
+                            parsing_exitoso, parser_version,
+                            pdf_producer, pdf_author, pdf_title, pdf_creation_date,
+                            parsed_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON DUPLICATE KEY UPDATE
+                            parsing_exitoso = VALUES(parsing_exitoso),
+                            parser_version = VALUES(parser_version),
+                            pdf_producer = VALUES(pdf_producer),
+                            pdf_author = VALUES(pdf_author),
+                            pdf_title = VALUES(pdf_title),
+                            pdf_creation_date = VALUES(pdf_creation_date),
+                            parsed_at = NOW()
+                    """, (
+                        documento_id, "FEHACIENTE", formato_archivo, True, parser_version,
+                        parsed_data.get('pdf_producer'),
+                        parsed_data.get('pdf_author'),
+                        parsed_data.get('pdf_title'),
+                        parsed_data.get('pdf_creation_date')
+                    ))
+
+                    formulario_parseado_id = cursor.lastrowid
+
+                    # 3.2: Insertar datos parseados en formularios_fehaciente_parsed
+                    cursor.execute("""
+                        INSERT INTO formularios_fehaciente_parsed (
+                            formulario_parseado_id, documento_id, solicitud_id,
+                            razon_social, rut, domicilio_legal,
+                            representante_legal_nombre, representante_legal_email, representante_legal_telefono,
+                            coordinador_proyecto_1_nombre, coordinador_proyecto_1_email, coordinador_proyecto_1_telefono,
+                            coordinador_proyecto_2_nombre, coordinador_proyecto_2_email, coordinador_proyecto_2_telefono,
+                            nombre_proyecto, tipo_proyecto, tipo_tecnologia,
+                            potencia_neta_inyeccion_mw, potencia_neta_retiro_mw,
+                            factor_potencia_nominal, modo_control_inversores,
+                            componente_generacion, componente_generacion_potencia_mw,
+                            componente_almacenamiento, componente_almacenamiento_potencia_mw,
+                            componente_almacenamiento_energia_mwh, componente_almacenamiento_horas,
+                            proyecto_coordenadas_utm_huso, proyecto_coordenadas_utm_este, proyecto_coordenadas_utm_norte,
+                            proyecto_comuna, proyecto_region,
+                            nombre_se_o_linea, tipo_conexion,
+                            seccionamiento_distancia_km, seccionamiento_se_cercana,
+                            nivel_tension_kv, pano_o_estructura,
+                            fecha_estimada_construccion, fecha_estimada_operacion,
+                            conexion_coordenadas_utm_huso, conexion_coordenadas_utm_este, conexion_coordenadas_utm_norte,
+                            conexion_comuna, conexion_region,
+                            informacion_adicional,
+                            created_at
+                        ) VALUES (
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            %s,
+                            NOW()
+                        )
+                        ON DUPLICATE KEY UPDATE
+                            razon_social = VALUES(razon_social),
+                            rut = VALUES(rut),
+                            domicilio_legal = VALUES(domicilio_legal),
+                            representante_legal_nombre = VALUES(representante_legal_nombre),
+                            representante_legal_email = VALUES(representante_legal_email),
+                            representante_legal_telefono = VALUES(representante_legal_telefono),
+                            coordinador_proyecto_1_nombre = VALUES(coordinador_proyecto_1_nombre),
+                            coordinador_proyecto_1_email = VALUES(coordinador_proyecto_1_email),
+                            coordinador_proyecto_1_telefono = VALUES(coordinador_proyecto_1_telefono),
+                            coordinador_proyecto_2_nombre = VALUES(coordinador_proyecto_2_nombre),
+                            coordinador_proyecto_2_email = VALUES(coordinador_proyecto_2_email),
+                            coordinador_proyecto_2_telefono = VALUES(coordinador_proyecto_2_telefono),
+                            nombre_proyecto = VALUES(nombre_proyecto),
+                            tipo_proyecto = VALUES(tipo_proyecto),
+                            tipo_tecnologia = VALUES(tipo_tecnologia),
+                            potencia_neta_inyeccion_mw = VALUES(potencia_neta_inyeccion_mw),
+                            potencia_neta_retiro_mw = VALUES(potencia_neta_retiro_mw),
+                            factor_potencia_nominal = VALUES(factor_potencia_nominal),
+                            modo_control_inversores = VALUES(modo_control_inversores),
+                            componente_generacion = VALUES(componente_generacion),
+                            componente_generacion_potencia_mw = VALUES(componente_generacion_potencia_mw),
+                            componente_almacenamiento = VALUES(componente_almacenamiento),
+                            componente_almacenamiento_potencia_mw = VALUES(componente_almacenamiento_potencia_mw),
+                            componente_almacenamiento_energia_mwh = VALUES(componente_almacenamiento_energia_mwh),
+                            componente_almacenamiento_horas = VALUES(componente_almacenamiento_horas),
+                            proyecto_coordenadas_utm_huso = VALUES(proyecto_coordenadas_utm_huso),
+                            proyecto_coordenadas_utm_este = VALUES(proyecto_coordenadas_utm_este),
+                            proyecto_coordenadas_utm_norte = VALUES(proyecto_coordenadas_utm_norte),
+                            proyecto_comuna = VALUES(proyecto_comuna),
+                            proyecto_region = VALUES(proyecto_region),
+                            nombre_se_o_linea = VALUES(nombre_se_o_linea),
+                            tipo_conexion = VALUES(tipo_conexion),
+                            seccionamiento_distancia_km = VALUES(seccionamiento_distancia_km),
+                            seccionamiento_se_cercana = VALUES(seccionamiento_se_cercana),
+                            nivel_tension_kv = VALUES(nivel_tension_kv),
+                            pano_o_estructura = VALUES(pano_o_estructura),
+                            fecha_estimada_construccion = VALUES(fecha_estimada_construccion),
+                            fecha_estimada_operacion = VALUES(fecha_estimada_operacion),
+                            conexion_coordenadas_utm_huso = VALUES(conexion_coordenadas_utm_huso),
+                            conexion_coordenadas_utm_este = VALUES(conexion_coordenadas_utm_este),
+                            conexion_coordenadas_utm_norte = VALUES(conexion_coordenadas_utm_norte),
+                            conexion_comuna = VALUES(conexion_comuna),
+                            conexion_region = VALUES(conexion_region),
+                            informacion_adicional = VALUES(informacion_adicional)
+                    """, (
+                        formulario_parseado_id, documento_id, solicitud_id,
+                        # Antecedentes de la Empresa Solicitante
+                        parsed_data.get("razon_social"),
+                        parsed_data.get("rut"),
+                        parsed_data.get("domicilio_legal"),
+                        # Contacto de Representante Legal
+                        parsed_data.get("representante_legal_nombre"),
+                        parsed_data.get("representante_legal_email"),
+                        parsed_data.get("representante_legal_telefono"),
+                        # Coordinadores de Proyectos
+                        parsed_data.get("coordinador_proyecto_1_nombre"),
+                        parsed_data.get("coordinador_proyecto_1_email"),
+                        parsed_data.get("coordinador_proyecto_1_telefono"),
+                        parsed_data.get("coordinador_proyecto_2_nombre"),
+                        parsed_data.get("coordinador_proyecto_2_email"),
+                        parsed_data.get("coordinador_proyecto_2_telefono"),
+                        # Antecedentes del Proyecto
+                        parsed_data.get("nombre_proyecto"),
+                        parsed_data.get("tipo_proyecto"),
+                        parsed_data.get("tipo_tecnologia"),
+                        parsed_data.get("potencia_neta_inyeccion_mw"),
+                        parsed_data.get("potencia_neta_retiro_mw"),
+                        parsed_data.get("factor_potencia_nominal"),
+                        parsed_data.get("modo_control_inversores"),
+                        # Parámetros Sistemas de Almacenamiento
+                        parsed_data.get("componente_generacion"),
+                        parsed_data.get("componente_generacion_potencia_mw"),
+                        parsed_data.get("componente_almacenamiento"),
+                        parsed_data.get("componente_almacenamiento_potencia_mw"),
+                        parsed_data.get("componente_almacenamiento_energia_mwh"),
+                        parsed_data.get("componente_almacenamiento_horas"),
+                        # Ubicación Geográfica del Proyecto
+                        parsed_data.get("proyecto_coordenadas_utm_huso"),
+                        parsed_data.get("proyecto_coordenadas_utm_este"),
+                        parsed_data.get("proyecto_coordenadas_utm_norte"),
+                        parsed_data.get("proyecto_comuna"),
+                        parsed_data.get("proyecto_region"),
+                        # Antecedentes del Punto de Conexión
+                        parsed_data.get("nombre_se_o_linea"),
+                        parsed_data.get("tipo_conexion"),
+                        parsed_data.get("seccionamiento_distancia_km"),
+                        parsed_data.get("seccionamiento_se_cercana"),
+                        parsed_data.get("nivel_tension_kv"),
+                        parsed_data.get("pano_o_estructura"),
+                        parsed_data.get("fecha_estimada_construccion"),
+                        parsed_data.get("fecha_estimada_operacion"),
+                        # Ubicación Geográfica del Punto de Conexión
+                        parsed_data.get("conexion_coordenadas_utm_huso"),
+                        parsed_data.get("conexion_coordenadas_utm_este"),
+                        parsed_data.get("conexion_coordenadas_utm_norte"),
+                        parsed_data.get("conexion_comuna"),
+                        parsed_data.get("conexion_region"),
+                        # Información Adicional
+                        parsed_data.get("informacion_adicional"),
+                    ))
+
+                    conn.commit()
+                    logger.info(f"✅ Documento Fehaciente {documento_id} parseado y almacenado exitosamente")
+                    return True
+
+                except Error as e:
+                    # Rollback automático si algo falla
+                    conn.rollback()
+                    error_msg = f"Error en transacción: {str(e)}"
+                    logger.error(f"❌ {error_msg}", exc_info=True)
+
+                    # Registrar parsing FALLIDO
+                    self.insert_formulario_parseado(
+                        documento_id=documento_id,
+                        tipo_formulario="FEHACIENTE",
+                        formato_archivo=formato_archivo,
+                        parsing_exitoso=False,
+                        parser_version=parser_version,
+                        parsing_error=error_msg
+                    )
+                    return False
+
+        except Exception as e:
+            error_msg = f"Error al parsear Fehaciente: {str(e)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+
+            # Registrar parsing FALLIDO
+            self.insert_formulario_parseado(
+                documento_id=documento_id,
+                tipo_formulario="FEHACIENTE",
+                formato_archivo=formato_archivo,
+                parsing_exitoso=False,
+                parser_version=parser_version,
+                parsing_error=error_msg
+            )
+            return False
+
+
 def get_cen_db_manager() -> CENDatabaseManager:
     """
     Factory function para crear instancia del gestor de BD del CEN.

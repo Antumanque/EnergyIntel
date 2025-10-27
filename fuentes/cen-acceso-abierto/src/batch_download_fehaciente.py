@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Script de descarga masiva de formularios SAC (PDF y XLSX).
+Script de descarga masiva de formularios Fehaciente (PDF y XLSX).
 
 Este script:
-1. Obtiene lista de documentos SAC NO descargados
+1. Obtiene lista de documentos Fehaciente NO descargados
 2. Descarga cada documento usando presigned URLs
 3. Actualiza estado en base de datos
 4. Genera estadísticas de éxito/error
 
 Uso:
-    python -m src.batch_download_sac [--limit N] [--dry-run]
+    python -m src.batch_download_fehaciente [--limit N] [--dry-run]
 
 Ejemplos:
     # Descargar primeros 10 documentos (prueba)
-    python -m src.batch_download_sac --limit 10
+    python -m src.batch_download_fehaciente --limit 10
 
-    # Descargar todos los documentos SAC
-    python -m src.batch_download_sac
+    # Descargar todos los documentos Fehaciente
+    python -m src.batch_download_fehaciente
 
     # Ver qué se descargaría sin ejecutar
-    python -m src.batch_download_sac --dry-run --limit 20
+    python -m src.batch_download_fehaciente --dry-run --limit 20
 
 Fecha: 2025-10-20
 """
@@ -43,8 +43,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class SACBatchDownloader:
-    """Descargador masivo de formularios SAC."""
+class FehacienteBatchDownloader:
+    """Descargador masivo de formularios Fehaciente."""
 
     def __init__(self):
         """Inicializa el descargador masivo."""
@@ -69,7 +69,7 @@ class SACBatchDownloader:
 
     def get_pending_downloads(self, limit: int = None) -> List[Dict]:
         """
-        Obtiene lista de documentos SAC NO descargados.
+        Obtiene lista de documentos Fehaciente NO descargados.
 
         Args:
             limit: Máximo número de documentos a retornar (None = todos)
@@ -95,7 +95,7 @@ class SACBatchDownloader:
                 ELSE 'OTRO'
             END AS formato_archivo
         FROM documentos d
-        WHERE d.tipo_documento = 'Formulario SAC'
+        WHERE d.tipo_documento = 'Formulario_proyecto_fehaciente'
           AND d.visible = 1
           AND d.deleted = 0
           AND (d.downloaded = 0 OR d.downloaded IS NULL)
@@ -111,7 +111,7 @@ class SACBatchDownloader:
             cursor.execute(query)
             docs = cursor.fetchall()
 
-        logger.info(f"📋 Encontrados {len(docs)} documentos SAC pendientes de descargar")
+        logger.info(f"📋 Encontrados {len(docs)} documentos Fehaciente pendientes de descargar")
 
         return docs
 
@@ -200,7 +200,7 @@ class SACBatchDownloader:
             Diccionario con estadísticas finales
         """
         logger.info("=" * 70)
-        logger.info("🚀 DESCARGA MASIVA DE FORMULARIOS SAC")
+        logger.info("🚀 DESCARGA MASIVA DE FORMULARIOS Fehaciente")
         logger.info("=" * 70)
         logger.info(f"Modo: {'DRY RUN' if dry_run else 'EJECUCIÓN REAL'}")
         logger.info(f"Límite: {limit if limit else 'Sin límite'}")
@@ -336,18 +336,18 @@ class SACBatchDownloader:
 def main():
     """Punto de entrada principal."""
     parser = argparse.ArgumentParser(
-        description="Descarga masiva de formularios SAC",
+        description="Descarga masiva de formularios Fehaciente",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
   # Descargar primeros 10 documentos (prueba)
-  python -m src.batch_download_sac --limit 10
+  python -m src.batch_download_fehaciente --limit 10
 
-  # Descargar todos los documentos SAC
-  python -m src.batch_download_sac
+  # Descargar todos los documentos Fehaciente
+  python -m src.batch_download_fehaciente
 
   # Ver qué se descargaría sin ejecutar
-  python -m src.batch_download_sac --dry-run --limit 50
+  python -m src.batch_download_fehaciente --dry-run --limit 50
         """
     )
 
@@ -367,7 +367,7 @@ Ejemplos:
     args = parser.parse_args()
 
     # Ejecutar descarga masiva
-    batch_downloader = SACBatchDownloader()
+    batch_downloader = FehacienteBatchDownloader()
     stats = batch_downloader.run_batch_download(
         limit=args.limit,
         dry_run=args.dry_run

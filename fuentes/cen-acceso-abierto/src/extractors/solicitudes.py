@@ -311,6 +311,12 @@ class SolicitudesExtractor:
             for anio, solicitudes in solicitudes_results["solicitudes_by_year"].items():
                 all_solicitudes.extend(solicitudes)
 
+            # Deduplicar por ID (la API retorna las mismas solicitudes para todos los años)
+            logger.info(f"📊 Total solicitudes recolectadas (con duplicados): {len(all_solicitudes)}")
+            unique_solicitudes_dict = {s["id"]: s for s in all_solicitudes}
+            all_solicitudes = list(unique_solicitudes_dict.values())
+            logger.info(f"📊 Solicitudes únicas después de deduplicar: {len(all_solicitudes)}")
+
             logger.info(f"\n📥 Guardando {len(all_solicitudes)} solicitudes en la base de datos...")
             inserted_solicitudes = self.db_manager.insert_solicitudes_bulk(all_solicitudes)
             logger.info(f"✅ {inserted_solicitudes} solicitudes nuevas insertadas")

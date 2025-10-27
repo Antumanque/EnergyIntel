@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Script de descarga masiva de formularios SAC (PDF y XLSX).
+Script de parseo masivo de formularios SUCTD (PDF y XLSX).
 
 Este script:
-1. Obtiene lista de documentos SAC NO descargados
-2. Descarga cada documento usando presigned URLs
-3. Actualiza estado en base de datos
+1. Obtiene lista de documentos SUCTD descargados pero NO parseados
+2. Parsea cada documento (PDF o XLSX)
+3. Guarda resultados en base de datos
 4. Genera estadísticas de éxito/error
 
 Uso:
-    python -m src.batch_download_sac [--limit N] [--dry-run]
+    python -m src.batch_parse_suctd [--limit N] [--dry-run]
 
 Ejemplos:
-    # Descargar primeros 10 documentos (prueba)
-    python -m src.batch_download_sac --limit 10
+    # Parsear primeros 10 documentos (prueba)
+    python -m src.batch_parse_suctd --limit 10
 
-    # Descargar todos los documentos SAC
-    python -m src.batch_download_sac
+    # Parsear todos los documentos
+    python -m src.batch_parse_suctd
 
-    # Ver qué se descargaría sin ejecutar
-    python -m src.batch_download_sac --dry-run --limit 20
+    # Ver qué se parsearía sin ejecutar
+    python -m src.batch_parse_suctd --dry-run
 
 Fecha: 2025-10-20
 """
@@ -28,11 +28,9 @@ import argparse
 import logging
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
-from src.downloaders.documents import DocumentDownloader
 from src.repositories.cen import get_cen_db_manager
 from src.settings import get_settings
 
@@ -43,33 +41,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class SACBatchDownloader:
-    """Descargador masivo de formularios SAC."""
+class SUCTDBatchParser:
+    """Parseador masivo de formularios SUCTD."""
 
-    def __init__(self):
-        """Inicializa el descargador masivo."""
-        self.db = get_cen_db_manager()
+    def __init__(self, db_manager=None):
+        """Inicializa el parseador masivo."""
+        self.db = db_manager or get_cen_db_manager()
         self.settings = get_settings()
-        self.downloader = DocumentDownloader(
-            settings=self.settings,
-            downloads_dir="downloads",
-            timeout=60,
-            max_retries=3
-        )
 
         # Estadísticas
         self.stats = {
             "total": 0,
             "exitosos": 0,
             "fallidos": 0,
-            "ya_descargados": 0,
             "errores": [],
-            "por_formato": {"PDF": 0, "XLSX": 0, "XLS": 0, "OTRO": 0}
+            "por_formato": {"PDF": 0, "XLSX": 0, "XLS": 0}
         }
 
-    def get_pending_downloads(self, limit: int = None) -> List[Dict]:
+    def get_pending_documents(self, limit: int = None) -> List[Dict]:
         """
-        Obtiene lista de documentos SAC NO descargados.
+        Obtiene lista de documentos SUCTD descargados pero NO parseados.
 
         Args:
             limit: Máximo número de documentos a retornar (None = todos)
@@ -77,29 +68,21 @@ class SACBatchDownloader:
         Returns:
             Lista de diccionarios con info de documentos
         """
-        # Obtener años configurados (si no hay config, usar año actual)
-        years = self.settings.cen_years_list if self.settings.cen_years_list else [datetime.now().year]
-        year_filter = f"AND YEAR(d.create_date) IN ({','.join(map(str, years))})"
-
-        query = f"""
+        query = """
         SELECT
             d.id,
             d.solicitud_id,
             d.nombre,
-            d.ruta_s3,
-            d.downloaded,
-            CASE
-                WHEN d.nombre LIKE '%.pdf' THEN 'PDF'
-                WHEN d.nombre LIKE '%.xlsx' THEN 'XLSX'
-                WHEN d.nombre LIKE '%.xls' THEN 'XLS'
-                ELSE 'OTRO'
-            END AS formato_archivo
-        FROM documentos d
-        WHERE d.tipo_documento = 'Formulario SAC'
-          AND d.visible = 1
-          AND d.deleted = 0
-          AND (d.downloaded = 0 OR d.downloaded IS NULL)
-          {year_filter}
+            d.local_path,
+            d.formato_archivo
+        FROM documentos_listos_para_parsear d
+        WHERE d.tipo_documento = 'Formulario SUCTD'
+          AND d.downloaded = 1
+          AND d.id NOT IN (
+              SELECT documento_id
+              FROM formularios_parseados
+              WHERE parsing_exitoso = 1
+          )
         ORDER BY d.id ASC
         """
 
@@ -111,123 +94,89 @@ class SACBatchDownloader:
             cursor.execute(query)
             docs = cursor.fetchall()
 
-        logger.info(f"📋 Encontrados {len(docs)} documentos SAC pendientes de descargar")
+        logger.info(f"📋 Encontrados {len(docs)} documentos SUCTD pendientes de parsear")
 
         return docs
 
-    def download_document(self, doc: Dict) -> bool:
+    def parse_document(self, doc: Dict) -> Tuple[bool, str]:
         """
-        Descarga un documento individual.
+        Parsea un documento individual.
 
         Args:
             doc: Diccionario con info del documento
 
         Returns:
-            True si fue exitoso, False en caso contrario
+            Tupla (success: bool, error_msg: str)
         """
         documento_id = doc["id"]
         solicitud_id = doc["solicitud_id"]
-        nombre = doc["nombre"]
-        ruta_s3 = doc["ruta_s3"]
+        local_path = doc["local_path"]
         formato_archivo = doc["formato_archivo"]
 
-        logger.info(f"📥 Descargando doc {documento_id} ({formato_archivo}): {nombre[:50]}...")
+        # Construir path completo
+        downloads_dir = Path("downloads")
+        full_path = downloads_dir / local_path
+
+        # Verificar que existe
+        if not full_path.exists():
+            error_msg = f"Archivo no encontrado: {full_path}"
+            logger.error(f"❌ Doc {documento_id}: {error_msg}")
+            return False, error_msg
 
         try:
-            # Descargar el archivo
-            success, local_path, error_msg = self.downloader.download_document(
-                ruta_s3=ruta_s3,
-                solicitud_id=solicitud_id,
+            # Parsear y guardar
+            logger.info(f"📄 Parseando doc {documento_id} ({formato_archivo}): {doc['nombre'][:50]}...")
+
+            success = self.db.parse_and_store_suctd_document(
                 documento_id=documento_id,
-                filename=nombre
+                solicitud_id=solicitud_id,
+                local_path=str(full_path),
+                formato_archivo=formato_archivo
             )
 
             if success:
-                # Actualizar BD: marcar como descargado
-                with self.db.connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE documentos
-                        SET downloaded = 1,
-                            downloaded_at = NOW(),
-                            local_path = %s
-                        WHERE id = %s
-                    """, (local_path, documento_id))
-                    conn.commit()
-
-                logger.info(f"✅ Doc {documento_id} descargado: {local_path}")
-                return True
+                logger.info(f"✅ Doc {documento_id} parseado exitosamente")
+                return True, None
             else:
-                # Actualizar BD: marcar error de descarga
-                with self.db.connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE documentos
-                        SET download_error = %s
-                        WHERE id = %s
-                    """, (error_msg, documento_id))
-                    conn.commit()
-
-                logger.error(f"❌ Doc {documento_id} falló: {error_msg}")
-                self.stats["errores"].append({
-                    "documento_id": documento_id,
-                    "nombre": nombre,
-                    "formato": formato_archivo,
-                    "error": error_msg
-                })
-                return False
+                error_msg = "Parsing falló (campos críticos faltantes o error desconocido)"
+                logger.warning(f"⚠️  Doc {documento_id}: {error_msg}")
+                return False, error_msg
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"❌ Doc {documento_id}: Excepción - {error_msg}", exc_info=True)
-            self.stats["errores"].append({
-                "documento_id": documento_id,
-                "nombre": nombre,
-                "formato": formato_archivo,
-                "error": error_msg
-            })
-            return False
+            logger.error(f"❌ Doc {documento_id}: Error - {error_msg}", exc_info=True)
+            return False, error_msg
 
-    def run_batch_download(self, limit: int = None, dry_run: bool = False) -> Dict:
+    def run_batch_parsing(self, limit: int = None, dry_run: bool = False) -> Dict:
         """
-        Ejecuta descarga masiva de documentos.
+        Ejecuta parseo masivo de documentos.
 
         Args:
-            limit: Máximo número de documentos a descargar (None = todos)
-            dry_run: Si True, solo muestra qué se descargaría sin ejecutar
+            limit: Máximo número de documentos a parsear (None = todos)
+            dry_run: Si True, solo muestra qué se parsearía sin ejecutar
 
         Returns:
             Diccionario con estadísticas finales
         """
         logger.info("=" * 70)
-        logger.info("🚀 DESCARGA MASIVA DE FORMULARIOS SAC")
+        logger.info("🚀 PARSEO MASIVO DE FORMULARIOS SUCTD")
         logger.info("=" * 70)
         logger.info(f"Modo: {'DRY RUN' if dry_run else 'EJECUCIÓN REAL'}")
         logger.info(f"Límite: {limit if limit else 'Sin límite'}")
         logger.info("")
 
         # Paso 1: Obtener documentos pendientes
-        docs = self.get_pending_downloads(limit=limit)
+        docs = self.get_pending_documents(limit=limit)
 
         if not docs:
-            logger.info("✅ No hay documentos pendientes de descargar")
+            logger.info("✅ No hay documentos pendientes de parsear")
             return self.stats
 
         self.stats["total"] = len(docs)
 
         # Mostrar preview
-        logger.info("\n📋 Documentos a descargar:")
+        logger.info("\n📋 Documentos a parsear:")
         logger.info("-" * 70)
-
-        format_counts = {}
-        for doc in docs:
-            fmt = doc["formato_archivo"]
-            format_counts[fmt] = format_counts.get(fmt, 0) + 1
-
-        for fmt, count in format_counts.items():
-            logger.info(f"  {fmt:4s}: {count:4d} documentos")
-
-        logger.info("\nPrimeros 10:")
         for i, doc in enumerate(docs[:10], 1):
             logger.info(
                 f"{i:3d}. ID {doc['id']:5d} | {doc['formato_archivo']:4s} | "
@@ -240,22 +189,28 @@ class SACBatchDownloader:
         logger.info("")
 
         if dry_run:
-            logger.info("🔍 DRY RUN - No se descargará nada")
+            logger.info("🔍 DRY RUN - No se parseará nada")
             return self.stats
 
-        # Paso 2: Descargar cada documento
+        # Paso 2: Parsear cada documento
         start_time = time.time()
 
         for i, doc in enumerate(docs, 1):
             logger.info(f"\n[{i}/{len(docs)}] Procesando documento {doc['id']}...")
 
-            success = self.download_document(doc)
+            success, error_msg = self.parse_document(doc)
 
             if success:
                 self.stats["exitosos"] += 1
                 self.stats["por_formato"][doc["formato_archivo"]] += 1
             else:
                 self.stats["fallidos"] += 1
+                self.stats["errores"].append({
+                    "documento_id": doc["id"],
+                    "nombre": doc["nombre"],
+                    "formato": doc["formato_archivo"],
+                    "error": error_msg
+                })
 
             # Mostrar progreso cada 50 documentos
             if i % 50 == 0:
@@ -269,9 +224,6 @@ class SACBatchDownloader:
                     f"Tiempo restante: {remaining/60:.1f} min"
                 )
 
-            # Pequeña pausa para no saturar el servidor
-            time.sleep(0.5)
-
         # Paso 3: Reporte final
         elapsed = time.time() - start_time
         self._print_final_report(elapsed)
@@ -284,7 +236,7 @@ class SACBatchDownloader:
         logger.info("📊 REPORTE FINAL")
         logger.info("=" * 70)
         logger.info(f"Total documentos:        {self.stats['total']}")
-        logger.info(f"✅ Descargados exitosos: {self.stats['exitosos']}")
+        logger.info(f"✅ Parseados exitosos:   {self.stats['exitosos']}")
         logger.info(f"❌ Fallidos:             {self.stats['fallidos']}")
         logger.info("")
 
@@ -336,18 +288,18 @@ class SACBatchDownloader:
 def main():
     """Punto de entrada principal."""
     parser = argparse.ArgumentParser(
-        description="Descarga masiva de formularios SAC",
+        description="Parseo masivo de formularios SUCTD",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  # Descargar primeros 10 documentos (prueba)
-  python -m src.batch_download_sac --limit 10
+  # Parsear primeros 10 documentos (prueba)
+  python -m src.batch_parse_suctd --limit 10
 
-  # Descargar todos los documentos SAC
-  python -m src.batch_download_sac
+  # Parsear todos los documentos
+  python -m src.batch_parse_suctd
 
-  # Ver qué se descargaría sin ejecutar
-  python -m src.batch_download_sac --dry-run --limit 50
+  # Ver qué se parsearía sin ejecutar
+  python -m src.batch_parse_suctd --dry-run --limit 50
         """
     )
 
@@ -355,27 +307,27 @@ Ejemplos:
         "--limit",
         type=int,
         default=None,
-        help="Máximo número de documentos a descargar (default: todos)"
+        help="Máximo número de documentos a parsear (default: todos)"
     )
 
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Mostrar qué se descargaría sin ejecutar"
+        help="Mostrar qué se parsearía sin ejecutar"
     )
 
     args = parser.parse_args()
 
-    # Ejecutar descarga masiva
-    batch_downloader = SACBatchDownloader()
-    stats = batch_downloader.run_batch_download(
+    # Ejecutar parseo masivo
+    batch_parser = SUCTDBatchParser()
+    stats = batch_parser.run_batch_parsing(
         limit=args.limit,
         dry_run=args.dry_run
     )
 
     # Exit code basado en resultados
     if stats["total"] == 0:
-        sys.exit(0)  # No había nada que descargar
+        sys.exit(0)  # No había nada que parsear
     elif stats["fallidos"] == 0:
         sys.exit(0)  # Todo exitoso
     elif stats["exitosos"] > stats["fallidos"]:
