@@ -1,12 +1,12 @@
 """
-Configuration management using pydantic-settings.
+Configuración de la aplicación usando pydantic-settings.
 
-This module loads all configuration from environment variables and provides
-type-safe access to settings throughout the application.
+Este módulo carga toda la configuración desde variables de entorno y provee
+acceso type-safe a settings a través de la aplicación.
 """
 
 import os
-from typing import List
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,9 +14,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """
-    Application settings loaded from environment variables.
+    Settings de la aplicación cargados desde variables de entorno.
 
-    All settings can be overridden via environment variables or a .env file.
+    Todos los settings pueden ser sobreescritos via variables de entorno o archivo .env.
     """
 
     model_config = SettingsConfigDict(
@@ -26,73 +26,171 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Database configuration
+    # =============================================================================
+    # CONFIGURACIÓN DE BASE DE DATOS
+    # =============================================================================
     db_host: str = Field(
         default="localhost",
-        description="Database host (use 'api_db' for Docker Compose service)",
+        description="Database host (usar 'base_db' para Docker Compose)",
     )
-    db_port: int = Field(default=3306, description="Database port")
-    db_user: str = Field(default="api_user", description="Database username")
-    db_password: str = Field(default="api_password", description="Database password")
-    db_name: str = Field(
-        default="api_ingestion", description="Database name"
+    db_port: int = Field(default=3306, description="Puerto de la base de datos")
+    db_user: str = Field(default="base_user", description="Usuario de la base de datos")
+    db_password: str = Field(
+        default="base_password", description="Contraseña de la base de datos"
     )
+    db_name: str = Field(default="fuentes_base", description="Nombre de la base de datos")
 
-    # API configuration
-    api_urls: List[str] = Field(
-        default_factory=list,
-        description="List of API URLs to fetch (use API_URL_1, API_URL_2, etc.)",
-    )
-
-    # HTTP client configuration
+    # =============================================================================
+    # CONFIGURACIÓN DE HTTP CLIENT
+    # =============================================================================
     request_timeout: int = Field(
-        default=30, description="HTTP request timeout in seconds"
+        default=30, description="Timeout de request HTTP en segundos"
     )
     max_retries: int = Field(
-        default=3, description="Maximum number of retry attempts for failed requests"
+        default=3, description="Número máximo de intentos de retry para requests fallidos"
+    )
+
+    # =============================================================================
+    # CONFIGURACIÓN DE TIPO DE FUENTE
+    # =============================================================================
+    source_type: Literal["api_rest", "web_static", "web_dynamic", "file_download"] | None = (
+        Field(
+            default=None,
+            description="Tipo de fuente: api_rest, web_static, web_dynamic, file_download",
+        )
+    )
+
+    # =============================================================================
+    # CONFIGURACIÓN DE URLs (API, WEB, FILES)
+    # =============================================================================
+    api_urls: list[str] = Field(
+        default_factory=list,
+        description="Lista de URLs de API REST (usar API_URL_1, API_URL_2, etc.)",
+    )
+
+    web_urls: list[str] = Field(
+        default_factory=list,
+        description="Lista de URLs web para scraping (usar WEB_URL_1, WEB_URL_2, etc.)",
+    )
+
+    file_urls: list[str] = Field(
+        default_factory=list,
+        description="Lista de URLs de archivos (usar FILE_URL_1, FILE_URL_2, etc.)",
+    )
+
+    # =============================================================================
+    # CONFIGURACIÓN DE PLAYWRIGHT (scraping dinámico)
+    # =============================================================================
+    playwright_headless: bool = Field(
+        default=True, description="Ejecutar Playwright en modo headless"
+    )
+    playwright_slow_mo: int = Field(
+        default=0, description="Slow motion en ms para debugging de Playwright"
+    )
+    playwright_timeout: int = Field(
+        default=30000, description="Timeout de Playwright en ms"
+    )
+
+    # =============================================================================
+    # CONFIGURACIÓN DE PARSERS
+    # =============================================================================
+    auto_parse: bool = Field(
+        default=True, description="Habilitar parseo automático de archivos descargados"
+    )
+    parser_types: list[str] = Field(
+        default_factory=lambda: ["pdf", "xlsx", "csv"],
+        description="Tipos de parsers a habilitar",
+    )
+
+    # =============================================================================
+    # CONFIGURACIÓN DE LOGGING
+    # =============================================================================
+    log_level: str = Field(default="INFO", description="Nivel de logging")
+    log_file: str | None = Field(
+        default=None, description="Ruta de archivo de log (opcional)"
+    )
+
+    # =============================================================================
+    # CONFIGURACIÓN DE DOWNLOADS
+    # =============================================================================
+    download_dir: str = Field(
+        default="downloads", description="Directorio para archivos descargados"
     )
 
     @field_validator("api_urls", mode="before")
     @classmethod
-    def parse_api_urls(cls, v: str | List[str]) -> List[str]:
+    def parse_api_urls(cls, v: str | list[str]) -> list[str]:
         """
-        Parse API URLs from numbered environment variables.
+        Parse API URLs desde variables de entorno numeradas.
 
-        Looks for API_URL_1, API_URL_2, API_URL_3, etc. in the environment.
-        Also supports comma-separated string for backward compatibility.
+        Busca API_URL_1, API_URL_2, API_URL_3, etc. en el environment.
 
         Args:
-            v: Either a comma-separated string or a list of URLs
+            v: String separado por comas o lista de URLs
 
         Returns:
-            List of URL strings with whitespace stripped
+            Lista de strings de URLs con whitespace stripped
         """
-        # First, try to load from numbered environment variables
+        return cls._parse_numbered_urls(v, "API_URL")
+
+    @field_validator("web_urls", mode="before")
+    @classmethod
+    def parse_web_urls(cls, v: str | list[str]) -> list[str]:
+        """Parse WEB URLs desde variables de entorno numeradas."""
+        return cls._parse_numbered_urls(v, "WEB_URL")
+
+    @field_validator("file_urls", mode="before")
+    @classmethod
+    def parse_file_urls(cls, v: str | list[str]) -> list[str]:
+        """Parse FILE URLs desde variables de entorno numeradas."""
+        return cls._parse_numbered_urls(v, "FILE_URL")
+
+    @staticmethod
+    def _parse_numbered_urls(v: str | list[str], prefix: str) -> list[str]:
+        """
+        Helper para parsear URLs numeradas desde env vars.
+
+        Args:
+            v: Valor a parsear
+            prefix: Prefijo de la env var (ej. 'API_URL', 'WEB_URL')
+
+        Returns:
+            Lista de URLs
+        """
+        # Primero, intentar cargar desde variables de entorno numeradas
         urls = []
         i = 1
         while True:
-            url = os.getenv(f"API_URL_{i}")
+            url = os.getenv(f"{prefix}_{i}")
             if url:
                 urls.append(url.strip())
                 i += 1
             else:
                 break
 
-        # If we found numbered URLs, return those
+        # Si encontramos URLs numeradas, retornar esas
         if urls:
             return urls
 
-        # Otherwise, fall back to parsing the value passed in
+        # Sino, fallback a parsear el valor pasado
         if isinstance(v, str):
-            # Split by comma and strip whitespace
+            # Dividir por coma y strip whitespace
             urls = [url.strip() for url in v.split(",") if url.strip()]
             return urls
+        return v if v else []
+
+    @field_validator("parser_types", mode="before")
+    @classmethod
+    def parse_parser_types(cls, v: str | list[str]) -> list[str]:
+        """Parse parser types desde string separado por comas."""
+        if isinstance(v, str):
+            return [t.strip() for t in v.split(",") if t.strip()]
         return v if v else []
 
     @property
     def database_url(self) -> str:
         """
-        Generate a database connection URL.
+        Generar URL de conexión a la base de datos.
 
         Returns:
             MySQL connection string
@@ -104,10 +202,10 @@ class Settings(BaseSettings):
 
     def get_db_config(self) -> dict:
         """
-        Get database configuration as a dictionary for mysql.connector.
+        Obtener configuración de base de datos como diccionario para mysql.connector.
 
         Returns:
-            Dictionary with database connection parameters
+            Diccionario con parámetros de conexión a la base de datos
         """
         return {
             "host": self.db_host,
@@ -124,12 +222,12 @@ _settings: Settings | None = None
 
 def get_settings() -> Settings:
     """
-    Get the application settings singleton.
+    Obtener singleton de settings de la aplicación.
 
-    This ensures settings are loaded only once and reused throughout the application.
+    Esto asegura que los settings se cargan solo una vez y se reusan en la aplicación.
 
     Returns:
-        Settings instance with all configuration loaded
+        Instancia de Settings con toda la configuración cargada
     """
     global _settings
     if _settings is None:

@@ -1,64 +1,47 @@
 services:
-  # MariaDB database service (for local development)
-  api_db:
+  base_db:
     image: mariadb:10.11
-    container_name: api_ingestion_db
-    restart: unless-stopped
+    container_name: fuentes_base_db
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${DB_NAME:-api_ingestion}
-      MYSQL_USER: ${DB_USER:-api_user}
-      MYSQL_PASSWORD: ${DB_PASSWORD:-api_password}
-    volumes:
-      # Persistent data storage
-      - ./db/data:/var/lib/mysql
-      # Initialization scripts
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: fuentes_base
+      MYSQL_USER: base_user
+      MYSQL_PASSWORD: base_password
     ports:
-      - "${DB_PORT:-3306}:3306"
-    networks:
-      - api_network
+      - "3307:3306"
+    volumes:
+      - ./db/data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+    networks:
+      - fuentes_network
 
-  # Python application service
-  api_app:
+  base_app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: api_ingestion_app
-    depends_on:
-      api_db:
-        condition: service_healthy
+    container_name: fuentes_base_app
     environment:
-      # Database connection
-      DB_HOST: ${DB_HOST:-api_db}
-      DB_PORT: ${DB_PORT:-3306}
-      DB_USER: ${DB_USER:-api_user}
-      DB_PASSWORD: ${DB_PASSWORD:-api_password}
-      DB_NAME: ${DB_NAME:-api_ingestion}
-
-      # API configuration (numbered list: API_URL_1, API_URL_2, etc.)
-      API_URL_1: ${API_URL_1:-}
-      API_URL_2: ${API_URL_2:-}
-      API_URL_3: ${API_URL_3:-}
-      API_URL_4: ${API_URL_4:-}
-      API_URL_5: ${API_URL_5:-}
-
-      # HTTP client configuration
-      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
-      MAX_RETRIES: ${MAX_RETRIES:-3}
+      DB_HOST: base_db
+      DB_PORT: 3306
+      DB_USER: base_user
+      DB_PASSWORD: base_password
+      DB_NAME: fuentes_base
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+    depends_on:
+      base_db:
+        condition: service_healthy
     networks:
-      - api_network
-    profiles:
-      # This service runs on-demand, not with 'docker-compose up'
-      # Use: docker-compose run --rm api_app
-      - manual
+      - fuentes_network
 
 networks:
-  api_network:
+  fuentes_network:
     driver: bridge

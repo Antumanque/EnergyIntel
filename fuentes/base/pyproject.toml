@@ -1,11 +1,55 @@
 [project]
-name = "api-data-ingestion-template"
+name = "fuentes-base"
 version = "0.1.0"
-description = "A reusable Python template for REST API data ingestion with raw data storage in MariaDB"
+description = "Plantilla base reutilizable para ingesta de datos multi-fuente (APIs, scraping, PDFs, XLSX) con almacenamiento en MariaDB"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # Core HTTP y async
     "httpx>=0.28.1",
+
+    # Database
     "mysql-connector-python>=9.4.0",
+
+    # Configuration management
+    "pydantic>=2.0",
     "pydantic-settings>=2.0",
+
+    # Web scraping estático
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+
+    # Web scraping dinámico (JavaScript)
+    "playwright>=1.40.0",
+
+    # PDF parsing
+    "pdfplumber>=0.11.7",
+    "pymupdf>=1.26.5",
+    "pypdf>=6.1.2",
+
+    # Excel parsing
+    "openpyxl>=3.1.5",
+
+    # Utilities
+    "python-dotenv>=1.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
