@@ -210,6 +210,27 @@ __marimo__/
 db/data/
 downloads/
 temp_*.txt
-test_*.py
+
+# Temporary analysis files
+observaciones*.md
+PLAN_*.md
+RESUMEN_*.md
+ANALISIS_TEMPORAL*.md
+
+# Parser output logs and debugging
+parser_output*.log
+debug_*.txt
+diagnostic_*.txt
+
+# Downloaded PDFs and documents (keep in downloads/ only)
+*.pdf
+!docs/**/*.pdf  # Allow PDFs in docs/ directory
+formularios/*.xlsx
+formularios/*.xls
+
+# Test outputs and temporary test files
+test_output/
+tmp/
+temp/
 
 .claude

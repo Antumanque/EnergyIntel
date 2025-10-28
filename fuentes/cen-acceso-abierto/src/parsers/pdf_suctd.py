@@ -25,7 +25,51 @@ class SUCTDPDFParser:
 
     def __init__(self):
         """Inicializa el parser de SUCTD."""
-        self.version = "1.0.0"
+        self.version = "2.0.0"  # Versión mejorada con búsqueda flexible
+
+    def _find_value_in_row(
+        self,
+        clean_row: list,
+        label_idx: int,
+        min_length: int = 3
+    ) -> str:
+        """
+        Busca el primer valor no vacío después de la posición del label.
+
+        Mejora sobre la versión 1.0.0 que asumía posiciones fijas.
+        Ahora busca en TODAS las columnas después del label.
+
+        Args:
+            clean_row: Fila con celdas limpias (strings)
+            label_idx: Índice de la columna donde está el label
+            min_length: Longitud mínima del valor (default: 3 caracteres)
+
+        Returns:
+            Primer valor encontrado, o string vacío si no hay ninguno
+        """
+        for idx in range(label_idx + 1, len(clean_row)):
+            cell = clean_row[idx]
+            if cell and len(cell) >= min_length:
+                return cell
+        return ""
+
+    def _find_label_idx(self, clean_row: list, keywords: list) -> int:
+        """
+        Busca la posición de un label en la fila.
+
+        Args:
+            clean_row: Fila con celdas limpias
+            keywords: Lista de keywords a buscar (ej: ["razón social", "razon social"])
+
+        Returns:
+            Índice de la columna donde se encontró el label, o -1 si no se encuentra
+        """
+        for idx, cell in enumerate(clean_row):
+            cell_lower = cell.lower()
+            for keyword in keywords:
+                if keyword in cell_lower:
+                    return idx
+        return -1
 
     def parse(self, pdf_path: str) -> Dict[str, Any]:
         """
@@ -88,7 +132,10 @@ class SUCTDPDFParser:
 
     def _parse_table(self, table: list) -> Dict[str, Any]:
         """
-        Parsea la tabla extraída del PDF.
+        Parsea la tabla extraída del PDF con búsqueda flexible.
+
+        V2.0.0: Busca labels y valores en CUALQUIER columna, no solo posiciones fijas.
+        Esto resuelve el problema de PDFs con layouts variables (columnas en diferentes posiciones).
 
         Args:
             table: Lista de filas (cada fila es una lista de celdas)
@@ -106,172 +153,310 @@ class SUCTDPDFParser:
             # Limpiar valores None
             clean_row = [str(cell).strip() if cell else "" for cell in row]
 
-            # El patrón general es: columna[1] = label, columna[2+] = valor
-            label = clean_row[1].lower() if len(clean_row) > 1 else ""
-            value = clean_row[2] if len(clean_row) > 2 else ""
-
             # === SECCIÓN: Antecedentes de la Empresa Solicitante ===
 
-            if "razón social" in label or "razon social" in label:
-                data["razon_social"] = value
+            # Razón Social
+            label_idx = self._find_label_idx(clean_row, ["razón social", "razon social"])
+            if label_idx >= 0 and "razon_social" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value:
+                    data["razon_social"] = value
 
-            elif label == "rut":
-                data["rut"] = self._normalize_rut(value)
+            # RUT
+            label_idx = self._find_label_idx(clean_row, ["rut"])
+            if label_idx >= 0 and "rut" not in data:
+                # Para RUT, buscar con min_length=1 ya que puede ser corto (ej: "1-9")
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value and ("-" in value or value.isdigit()):
+                    data["rut"] = self._normalize_rut(value)
 
-            elif "domicilio legal" in label:
-                data["domicilio_legal"] = value
+            # Domicilio Legal
+            label_idx = self._find_label_idx(clean_row, ["domicilio legal"])
+            if label_idx >= 0 and "domicilio_legal" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value:
+                    data["domicilio_legal"] = value
 
             # === SECCIÓN: Representante Legal ===
 
-            elif "nombre del representante legal" in label:
-                # El valor puede estar en columna[3] o [4]
-                value = clean_row[3] if len(clean_row) > 3 and clean_row[3] else value
-                data["representante_legal_nombre"] = value
+            # Nombre del Representante Legal
+            label_idx = self._find_label_idx(clean_row, ["nombre del representante legal"])
+            if label_idx >= 0 and "representante_legal_nombre" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["representante_legal_nombre"] = value
 
-            elif label == "e-mail" and "representante_legal_nombre" in data:
-                # Primer email es del representante legal
-                data["representante_legal_email"] = value
+            # Email del Representante Legal (solo si ya tenemos el nombre)
+            label_idx = self._find_label_idx(clean_row, ["e-mail"])
+            if label_idx >= 0 and "representante_legal_nombre" in data and "representante_legal_email" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value and "@" in value:
+                    data["representante_legal_email"] = value
 
-            elif label == "teléfono" and "representante_legal_nombre" in data and "representante_legal_email" in data:
-                # Teléfono del representante
-                data["representante_legal_telefono"] = value
+            # Teléfono del Representante Legal
+            label_idx = self._find_label_idx(clean_row, ["teléfono", "telefono"])
+            if label_idx >= 0 and "representante_legal_nombre" in data and "representante_legal_email" in data and "representante_legal_telefono" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value:
+                    data["representante_legal_telefono"] = value
 
             # === SECCIÓN: Coordinadores de Proyectos ===
 
-            elif "nombre primer coordinador" in label or ("coordinador de proyecto" in label and "coordinador_proyecto_1_nombre" not in data):
-                coord_nombre = clean_row[3] if len(clean_row) > 3 and clean_row[3] else value
-                data["coordinador_proyecto_1_nombre"] = coord_nombre
-                self._next_coord = 1
+            # Primer Coordinador - Nombre
+            label_idx = self._find_label_idx(clean_row, ["nombre primer coordinador", "coordinador de proyecto"])
+            if label_idx >= 0 and "coordinador_proyecto_1_nombre" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["coordinador_proyecto_1_nombre"] = value
+                    self._next_coord = 1
 
-            elif "nombre segundo coordinador" in label or ("coordinador de proyecto" in label and "coordinador_proyecto_1_nombre" in data):
-                coord_nombre = clean_row[3] if len(clean_row) > 3 and clean_row[3] else value
-                data["coordinador_proyecto_2_nombre"] = coord_nombre
-                self._next_coord = 2
+            # Segundo Coordinador - Nombre
+            label_idx = self._find_label_idx(clean_row, ["nombre segundo coordinador"])
+            if label_idx >= 0 and "coordinador_proyecto_2_nombre" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["coordinador_proyecto_2_nombre"] = value
+                    self._next_coord = 2
 
-            elif "e-mail primer coordinador" in label or (label == "e-mail" and hasattr(self, '_next_coord') and self._next_coord == 1):
-                data["coordinador_proyecto_1_email"] = value
+            # Coordinadores - Emails (context-dependent)
+            label_idx = self._find_label_idx(clean_row, ["e-mail primer coordinador"])
+            if label_idx >= 0 and "coordinador_proyecto_1_email" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value and "@" in value:
+                    data["coordinador_proyecto_1_email"] = value
 
-            elif "e-mail segundo coordinador" in label or (label == "e-mail" and hasattr(self, '_next_coord') and self._next_coord == 2):
-                data["coordinador_proyecto_2_email"] = value
+            label_idx = self._find_label_idx(clean_row, ["e-mail segundo coordinador"])
+            if label_idx >= 0 and "coordinador_proyecto_2_email" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value and "@" in value:
+                    data["coordinador_proyecto_2_email"] = value
 
-            elif "teléfono primer coordinador" in label or ("telefono primer" in label):
-                data["coordinador_proyecto_1_telefono"] = value
+            # Coordinadores - Teléfonos
+            label_idx = self._find_label_idx(clean_row, ["teléfono primer coordinador", "telefono primer"])
+            if label_idx >= 0 and "coordinador_proyecto_1_telefono" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value:
+                    data["coordinador_proyecto_1_telefono"] = value
 
-            elif "teléfono segundo coordinador" in label or ("telefono segundo" in label):
-                data["coordinador_proyecto_2_telefono"] = value
+            label_idx = self._find_label_idx(clean_row, ["teléfono segundo coordinador", "telefono segundo"])
+            if label_idx >= 0 and "coordinador_proyecto_2_telefono" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value:
+                    data["coordinador_proyecto_2_telefono"] = value
 
             # === SECCIÓN: Antecedentes del Proyecto ===
 
-            elif "nombre del proyecto" in label:
-                data["nombre_proyecto"] = clean_row[3] if len(clean_row) > 3 else value
+            # Nombre del Proyecto
+            label_idx = self._find_label_idx(clean_row, ["nombre del proyecto"])
+            if label_idx >= 0 and "nombre_proyecto" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=5)
+                if value:
+                    data["nombre_proyecto"] = value
 
-            elif "tipo de proyecto" in label or "tipo proyecto" in label:
-                data["tipo_proyecto"] = value
+            # Tipo de Proyecto
+            label_idx = self._find_label_idx(clean_row, ["tipo de proyecto", "tipo proyecto"])
+            if label_idx >= 0 and "tipo_proyecto" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["tipo_proyecto"] = value
 
-            elif "tipo de tecnología" in label or "tipo tecnologia" in label:
-                data["tipo_tecnologia"] = value
+            # Tipo de Tecnología
+            label_idx = self._find_label_idx(clean_row, ["tipo de tecnología", "tipo tecnologia"])
+            if label_idx >= 0 and "tipo_tecnologia" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["tipo_tecnologia"] = value
 
-            elif "potencia neta solicitada de inyección" in label or "potencia neta de inyeccion" in label:
-                data["potencia_neta_inyeccion_mw"] = self._parse_decimal(value)
+            # Potencia Neta de Inyección
+            label_idx = self._find_label_idx(clean_row, ["potencia neta solicitada de inyección", "potencia neta de inyeccion"])
+            if label_idx >= 0 and "potencia_neta_inyeccion_mw" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["potencia_neta_inyeccion_mw"] = self._parse_decimal(value)
 
-            elif "potencia neta solicitada de retiro" in label or "potencia neta de retiro" in label:
-                data["potencia_neta_retiro_mw"] = self._parse_decimal(value)
+            # Potencia Neta de Retiro
+            label_idx = self._find_label_idx(clean_row, ["potencia neta solicitada de retiro", "potencia neta de retiro"])
+            if label_idx >= 0 and "potencia_neta_retiro_mw" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["potencia_neta_retiro_mw"] = self._parse_decimal(value)
 
-            elif "factor de potencia nominal" in label:
-                data["factor_potencia_nominal"] = self._parse_decimal(value)
+            # Factor de Potencia Nominal
+            label_idx = self._find_label_idx(clean_row, ["factor de potencia nominal"])
+            if label_idx >= 0 and "factor_potencia_nominal" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["factor_potencia_nominal"] = self._parse_decimal(value)
 
-            elif "modo de operación inversores" in label or "modo de operacion" in label:
-                data["modo_operacion_inversores"] = value
+            # Modo de Operación Inversores
+            label_idx = self._find_label_idx(clean_row, ["modo de operación inversores", "modo de operacion"])
+            if label_idx >= 0 and "modo_operacion_inversores" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["modo_operacion_inversores"] = value
 
             # === SECCIÓN: Parámetros Sistemas de Almacenamiento ===
 
-            elif "componente generación" in label or "componente generacion" in label:
-                data["componente_generacion"] = value
+            # Componente Generación
+            label_idx = self._find_label_idx(clean_row, ["componente generación", "componente generacion"])
+            if label_idx >= 0 and "componente_generacion" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=2)
+                if value:
+                    data["componente_generacion"] = value
 
-            elif "componente de almacenamiento" in label:
-                data["componente_almacenamiento"] = value
+            # Componente Almacenamiento
+            label_idx = self._find_label_idx(clean_row, ["componente de almacenamiento"])
+            if label_idx >= 0 and "componente_almacenamiento" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=2)
+                if value:
+                    data["componente_almacenamiento"] = value
 
-            elif "potencia [mw]" in label and "componente_generacion" in data and "componente_generacion_potencia_mw" not in data:
-                # Primera aparición de "Potencia [MW]" es para generación
-                data["componente_generacion_potencia_mw"] = self._parse_decimal(value)
+            # Potencia [MW] - Primera aparición (generación)
+            label_idx = self._find_label_idx(clean_row, ["potencia [mw]"])
+            if label_idx >= 0 and "componente_generacion" in data and "componente_generacion_potencia_mw" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["componente_generacion_potencia_mw"] = self._parse_decimal(value)
 
-            elif "potencia [mw]" in label and "componente_almacenamiento" in data and "componente_almacenamiento_potencia_mw" not in data:
-                # Segunda aparición es para almacenamiento
-                data["componente_almacenamiento_potencia_mw"] = self._parse_decimal(value)
+            # Potencia [MW] - Segunda aparición (almacenamiento)
+            label_idx = self._find_label_idx(clean_row, ["potencia [mw]"])
+            if label_idx >= 0 and "componente_almacenamiento" in data and "componente_almacenamiento_potencia_mw" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["componente_almacenamiento_potencia_mw"] = self._parse_decimal(value)
 
-            elif "energía [mwh]" in label or "energia [mwh]" in label:
-                data["componente_almacenamiento_energia_mwh"] = self._parse_decimal(value)
+            # Energía [MWh]
+            label_idx = self._find_label_idx(clean_row, ["energía [mwh]", "energia [mwh]"])
+            if label_idx >= 0 and "componente_almacenamiento_energia_mwh" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["componente_almacenamiento_energia_mwh"] = self._parse_decimal(value)
 
-            elif "horas de almacenamiento" in label:
-                data["componente_almacenamiento_horas"] = self._parse_decimal(value)
+            # Horas de Almacenamiento
+            label_idx = self._find_label_idx(clean_row, ["horas de almacenamiento"])
+            if label_idx >= 0 and "componente_almacenamiento_horas" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["componente_almacenamiento_horas"] = self._parse_decimal(value)
 
             # === SECCIÓN: Ubicación Geográfica del Proyecto ===
 
-            elif "coordenadas u.t.m." in label.lower() and "proyecto_coordenadas_utm_huso" not in data:
-                # Primera aparición = ubicación del proyecto
-                if len(clean_row) > 3:
-                    data["proyecto_coordenadas_utm_huso"] = clean_row[3]
-                if len(clean_row) > 5:
-                    data["proyecto_coordenadas_utm_este"] = self._parse_coordinate(clean_row[5])
-                if len(clean_row) > 7:
-                    data["proyecto_coordenadas_utm_norte"] = self._parse_coordinate(clean_row[7])
+            # Coordenadas UTM del Proyecto (primera aparición)
+            label_idx = self._find_label_idx(clean_row, ["coordenadas u.t.m.", "coordenadas utm"])
+            if label_idx >= 0 and "proyecto_coordenadas_utm_huso" not in data:
+                # Buscar huso, este, norte en columnas siguientes
+                remaining_cols = clean_row[label_idx + 1:]
+                if len(remaining_cols) >= 1:
+                    data["proyecto_coordenadas_utm_huso"] = remaining_cols[0] if remaining_cols[0] else None
+                if len(remaining_cols) >= 3:
+                    data["proyecto_coordenadas_utm_este"] = self._parse_coordinate(remaining_cols[2])
+                if len(remaining_cols) >= 5:
+                    data["proyecto_coordenadas_utm_norte"] = self._parse_coordinate(remaining_cols[4])
 
-            elif label == "comuna" and "proyecto_comuna" not in data:
-                # Primera aparición de comuna = comuna del proyecto
-                data["proyecto_comuna"] = value
-                # Región típicamente está más adelante
-                if len(clean_row) > 5 and "región" in clean_row[5].lower():
-                    data["proyecto_region"] = clean_row[6] if len(clean_row) > 6 else ""
+            # Comuna del Proyecto (primera aparición)
+            label_idx = self._find_label_idx(clean_row, ["comuna"])
+            if label_idx >= 0 and "proyecto_comuna" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["proyecto_comuna"] = value
+                    # Buscar región en la misma fila
+                    region_idx = self._find_label_idx(clean_row[label_idx:], ["región", "region"])
+                    if region_idx >= 0:
+                        region_value = self._find_value_in_row(clean_row, label_idx + region_idx, min_length=3)
+                        if region_value:
+                            data["proyecto_region"] = region_value
 
             # === SECCIÓN: Antecedentes del Punto de Conexión ===
 
-            elif "nombre de la s/e" in label or "nombre de la se" in label or "línea de transmisión" in label:
-                data["nombre_se_o_linea"] = value
+            # Nombre de la S/E o Línea
+            label_idx = self._find_label_idx(clean_row, ["nombre de la s/e", "nombre de la se", "línea de transmisión", "linea de transmision"])
+            if label_idx >= 0 and "nombre_se_o_linea" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["nombre_se_o_linea"] = value
 
-            elif "tipo de conexión" in label or "tipo de conexion" in label:
-                data["tipo_conexion"] = value
+            # Tipo de Conexión
+            label_idx = self._find_label_idx(clean_row, ["tipo de conexión", "tipo de conexion"])
+            if label_idx >= 0 and "tipo_conexion" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["tipo_conexion"] = value
 
-            elif "seccionamiento o derivación" in label and "distanci" in label:
-                # Distancia para seccionamiento o derivación
-                data["seccionamiento_distancia_km"] = self._parse_decimal(value)
+            # Seccionamiento: Distancia
+            label_idx = self._find_label_idx(clean_row, ["seccionamiento o derivación", "seccionamiento o derivacion"])
+            if label_idx >= 0 and "distanci" in " ".join(clean_row).lower() and "seccionamiento_distancia_km" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["seccionamiento_distancia_km"] = self._parse_decimal(value)
 
-            elif "nombre s/e más cercana" in label or "se mas cercana" in label:
-                data["seccionamiento_se_cercana"] = value
+            # Seccionamiento: S/E más cercana
+            label_idx = self._find_label_idx(clean_row, ["nombre s/e más cercana", "se mas cercana"])
+            if label_idx >= 0 and "seccionamiento_se_cercana" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["seccionamiento_se_cercana"] = value
 
-            elif "nivel de tensión" in label or "nivel de tension" in label:
-                data["nivel_tension_kv"] = value
+            # Nivel de Tensión
+            label_idx = self._find_label_idx(clean_row, ["nivel de tensión", "nivel de tension"])
+            if label_idx >= 0 and "nivel_tension_kv" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["nivel_tension_kv"] = value
 
-            elif "paño" in label or "estructura" in label:
-                data["pano_o_estructura"] = value
+            # Paño o Estructura
+            label_idx = self._find_label_idx(clean_row, ["paño", "pano", "estructura"])
+            if label_idx >= 0 and "pano_o_estructura" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=1)
+                if value:
+                    data["pano_o_estructura"] = value
 
-            elif "fecha estimada de declaración en construcción" in label or "fecha estimada de construccion" in label.lower():
-                fecha_str = clean_row[3] if len(clean_row) > 3 else value
-                data["fecha_estimada_construccion"] = self._parse_date(fecha_str)
+            # Fecha Estimada de Construcción
+            label_idx = self._find_label_idx(clean_row, ["fecha estimada de declaración en construcción", "fecha estimada de construccion"])
+            if label_idx >= 0 and "fecha_estimada_construccion" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=8)
+                if value:
+                    data["fecha_estimada_construccion"] = self._parse_date(value)
 
-            elif "fecha estimada de entrada en operación" in label or "fecha estimada de operacion" in label:
-                fecha_str = clean_row[3] if len(clean_row) > 3 else value
-                data["fecha_estimada_operacion"] = self._parse_date(fecha_str)
+            # Fecha Estimada de Operación
+            label_idx = self._find_label_idx(clean_row, ["fecha estimada de entrada en operación", "fecha estimada de operacion"])
+            if label_idx >= 0 and "fecha_estimada_operacion" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=8)
+                if value:
+                    data["fecha_estimada_operacion"] = self._parse_date(value)
 
             # === SECCIÓN: Ubicación Geográfica del Punto de Conexión ===
 
-            elif "coordenadas u.t.m." in label.lower() and "proyecto_coordenadas_utm_huso" in data:
-                # Segunda aparición = ubicación del punto de conexión
-                if "conexion_coordenadas_utm_huso" not in data:
-                    if len(clean_row) > 3:
-                        data["conexion_coordenadas_utm_huso"] = clean_row[3]
-                    if len(clean_row) > 5:
-                        data["conexion_coordenadas_utm_este"] = self._parse_coordinate(clean_row[5])
-                    if len(clean_row) > 7:
-                        data["conexion_coordenadas_utm_norte"] = self._parse_coordinate(clean_row[7])
+            # Coordenadas UTM del Punto de Conexión (segunda aparición)
+            label_idx = self._find_label_idx(clean_row, ["coordenadas u.t.m.", "coordenadas utm"])
+            if label_idx >= 0 and "proyecto_coordenadas_utm_huso" in data and "conexion_coordenadas_utm_huso" not in data:
+                # Buscar huso, este, norte en columnas siguientes
+                remaining_cols = clean_row[label_idx + 1:]
+                if len(remaining_cols) >= 1:
+                    data["conexion_coordenadas_utm_huso"] = remaining_cols[0] if remaining_cols[0] else None
+                if len(remaining_cols) >= 3:
+                    data["conexion_coordenadas_utm_este"] = self._parse_coordinate(remaining_cols[2])
+                if len(remaining_cols) >= 5:
+                    data["conexion_coordenadas_utm_norte"] = self._parse_coordinate(remaining_cols[4])
 
-            elif label == "comuna" and "proyecto_comuna" in data:
-                # Segunda aparición = comuna del punto de conexión
-                data["conexion_comuna"] = value
-                if len(clean_row) > 5 and "región" in clean_row[5].lower():
-                    data["conexion_region"] = clean_row[6] if len(clean_row) > 6 else ""
+            # Comuna del Punto de Conexión (segunda aparición)
+            label_idx = self._find_label_idx(clean_row, ["comuna"])
+            if label_idx >= 0 and "proyecto_comuna" in data and "conexion_comuna" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["conexion_comuna"] = value
+                    # Buscar región en la misma fila
+                    region_idx = self._find_label_idx(clean_row[label_idx:], ["región", "region"])
+                    if region_idx >= 0:
+                        region_value = self._find_value_in_row(clean_row, label_idx + region_idx, min_length=3)
+                        if region_value:
+                            data["conexion_region"] = region_value
 
-            elif "información adicional" in label or "informacion adicional" in label:
-                data["informacion_adicional"] = value
+            # Información Adicional
+            label_idx = self._find_label_idx(clean_row, ["información adicional", "informacion adicional"])
+            if label_idx >= 0 and "informacion_adicional" not in data:
+                value = self._find_value_in_row(clean_row, label_idx, min_length=3)
+                if value:
+                    data["informacion_adicional"] = value
 
         # Limpieza final
         if hasattr(self, '_next_coord'):

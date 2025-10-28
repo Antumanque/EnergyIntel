@@ -107,24 +107,88 @@ FROM raw_api_data
 GROUP BY source_url;
 ```
 
+## Documentation
+
+### 📚 Complete Documentation Index
+
+- **[CLAUDE.md](CLAUDE.md)** - Complete development guide (architecture, patterns, deployment)
+- **[DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md)** - Database schema, relationships, queries
+- **[API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md)** - CEN API endpoints reference
+
+### 🔄 Framework Iterativo de Parsing (IMPORTANTE)
+
+Sistema para mejorar parsers de forma sistemática e iterativa:
+
+- **[docs/framework/FRAMEWORK_ITERATIVO.md](docs/framework/FRAMEWORK_ITERATIVO.md)** - Documentación técnica completa
+- **[docs/framework/GUIA_USO.md](docs/framework/GUIA_USO.md)** - Guía de uso práctica
+
+**Quick Start:**
+```bash
+# Primera iteración (parsear 1000 documentos)
+python -m src.iterative_parse --tipo SUCTD --batch 1000 --iteracion 1
+
+# Ver feedback y errores más comunes
+python -m src.iterative_parse --feedback --iteracion 1 --tipo SUCTD
+
+# Re-parse después de fix al parser
+python -m src.iterative_parse --tipo SUCTD --batch 1000 --iteracion 2 --reparse
+
+# Comparar progreso entre iteraciones
+python -m src.iterative_parse --compare --tipo SUCTD
+```
+
+### 📄 Parsers de Formularios PDF
+
+Documentación del sistema de parseo de formularios SUCTD, SAC y FEHACIENTE:
+
+- **[docs/parsers/PARSER_V2_CHANGELOG.md](docs/parsers/PARSER_V2_CHANGELOG.md)** - Parser v2.0.0 con búsqueda flexible
+- **[docs/parsers/comparativa_bibliotecas.md](docs/parsers/comparativa_bibliotecas.md)** - Comparativa de bibliotecas PDF (pdfplumber, camelot, pypdf)
+
+### 🔍 Investigaciones
+
+- **[docs/investigations/links_perdidos/ANALISIS.md](docs/investigations/links_perdidos/ANALISIS.md)** - Análisis de solicitudes sin formularios parseados
+
 ## Project Structure
 
 ```
 cen-acceso-abierto/
 ├── src/
-│   ├── __init__.py
-│   ├── main.py          # Main orchestration logic
-│   ├── settings.py      # Configuration management
-│   ├── database.py      # Database operations
-│   └── client.py        # HTTP client for APIs
+│   ├── main.py              # Orquestador principal
+│   ├── main_cen.py          # Extractor de solicitudes y documentos
+│   ├── iterative_parse.py   # Framework iterativo de parsing
+│   ├── parsers/             # Parsers de formularios (SUCTD, SAC, FEHACIENTE)
+│   ├── extractors/          # Extractores de API
+│   ├── repositories/        # Acceso a base de datos
+│   ├── settings.py          # Configuración
+│   └── http_client.py       # Cliente HTTP con retry
+│
+├── docs/
+│   ├── framework/           # Documentación Framework Iterativo
+│   ├── parsers/             # Documentación de parsers
+│   ├── investigations/      # Análisis e investigaciones
+│   ├── DATABASE_SCHEMA.md   # Schema completo de BD
+│   └── API_DOCUMENTATION.md # Referencia de API CEN
+│
+├── tests/                   # Scripts de testing
+│   ├── test_parser_v2.py
+│   └── test_regression_parser_v2.py
+│
+├── scripts/                 # Scripts utilitarios
+│   ├── reparse_failed.py
+│   └── diagnostic_illimani.py
+│
 ├── db/
-│   ├── init.sql         # Database initialization
-│   └── data/            # MariaDB data (gitignored)
-├── .env.example         # Example environment variables
-├── Dockerfile           # Application container
-├── docker-compose.yml   # Service orchestration
-├── pyproject.toml       # Python dependencies
-└── CLAUDE.md           # Development guide
+│   ├── init.sql             # Inicialización de BD
+│   ├── schema_*.sql         # Schemas de tablas
+│   ├── migrations/          # Migraciones de BD
+│   └── setup.py             # Script de setup de BD
+│
+├── .env.example             # Variables de entorno de ejemplo
+├── Dockerfile               # Contenedor de aplicación
+├── docker-compose.yml       # Orquestación de servicios
+├── pyproject.toml           # Dependencias Python
+├── deploy.sh                # Script de deployment
+└── CLAUDE.md                # Guía completa de desarrollo
 ```
 
 ## Configuration
