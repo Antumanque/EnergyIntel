@@ -1,295 +1,277 @@
-# CEN Acceso Abierto Data Dumper
+# CEN Acceso Abierto - Pipeline de Extracción y Análisis
 
-A reusable Python-based data ingestion template for consuming REST APIs from public sources. This service fetches data from configured API endpoints and stores raw responses in a MariaDB database.
+Sistema completo de extracción, descarga y parsing de solicitudes de conexión eléctrica desde el [CEN (Coordinador Eléctrico Nacional)](https://www.coordinador.cl/) de Chile.
 
-## Features
+## 🎯 Características
 
-- 🚀 Simple, maintainable architecture designed for low maintenance
-- 🔄 Automatic retry logic with exponential backoff
-- 📦 Raw data storage in JSON format
-- 🐳 Fully containerized with Docker and Docker Compose
-- ⚙️ Environment-based configuration with sensible defaults
-- 📊 MariaDB 10.11 for reliable data storage
-- 🔧 Built with modern Python tools (httpx, pydantic-settings, uv)
+- ✅ **Entry point único**: Un solo comando ejecuta todo el pipeline
+- ✅ **Idempotente**: Se puede ejecutar múltiples veces sin duplicar datos
+- ✅ **Incremental**: Solo procesa datos nuevos
+- ✅ **Append-only**: Nunca actualiza ni borra, solo inserta (auditoría completa)
+- ✅ **Detección automática**: Si no hay datos, carga desde 0
+- ✅ **Soporte completo**: SAC, SUCTD, FEHACIENTE (PDFs, XLSX, ZIPs)
+- ✅ **OCR integrado**: Tesseract para PDFs escaneados
+- ✅ **Estadísticas completas**: Reporte detallado al final
 
-## Quick Start
+## 📦 Datos Procesados
 
-### Prerequisites
+| Tipo | Descripción | Documentos |
+|------|-------------|------------|
+| **SAC** | Solicitud de Aprobación de Conexión | 1,154 parseados |
+| **SUCTD** | Uso de Capacidad de Transporte Dedicada | 536 parseados |
+| **FEHACIENTE** | Proyectos Fehacientes | 185 parseados |
 
-- Docker and Docker Compose installed
+**Total:** 2,455 solicitudes de conexión eléctrica con datos estructurados.
+
+## 🚀 Instalación Rápida
+
+### Prerrequisitos
+- Docker y Docker Compose
+- Python 3.12+ (para desarrollo local)
 - Git
 
 ### Setup
 
-1. **Clone the repository**
-   ```bash
-   git clone git@github.com:
-   cd cen-acceso-abierto
-   ```
-
-2. **Create your environment file**
-   ```bash
-   cp .env.example .env
-   ```
-
-3. **Configure CEN API settings** (optional)
-
-   The `.env` file is pre-configured for CEN Acceso Abierto. Optionally adjust:
-   ```env
-   # Years to extract (comma-separated)
-   CEN_YEARS=2025
-
-   # Or for production, extract all available years:
-   CEN_YEARS=2020,2021,2022,2023,2024,2025
-   ```
-
-4. **Start the database**
-   ```bash
-   docker-compose up -d cen_db
-   ```
-
-   Wait for the database to be healthy (about 30 seconds):
-   ```bash
-   docker-compose ps
-   ```
-
-5. **Run the data ingestion**
-   ```bash
-   docker-compose run --rm cen_app
-   ```
-
-## Usage
-
-### Running Manually
-
-Execute a single ingestion run:
 ```bash
-docker-compose run --rm cen_app
+# 1. Clonar repositorio
+git clone <repo-url>
+cd cen-acceso-abierto
+
+# 2. Configurar environment
+cp .env.example .env
+
+# 3. Iniciar base de datos
+docker-compose up -d cen_db
+
+# 4. Esperar a que la DB esté lista (30 seg)
+docker-compose ps
+
+# 5. Ejecutar migraciones
+./deploy.sh
 ```
 
-### Running on a Schedule
+## 🎮 Uso del Pipeline
 
-Add to your system crontab for periodic execution:
-
-```bash
-# Run every hour
-0 * * * * cd /path/to/cen-acceso-abierto && docker-compose run --rm cen_app
-
-# Run every 6 hours
-0 */6 * * * cd /path/to/cen-acceso-abierto && docker-compose run --rm cen_app
-
-# Run daily at 2 AM
-0 2 * * * cd /path/to/cen-acceso-abierto && docker-compose run --rm cen_app
-```
-
-### Viewing Data
-
-Connect to the database to view stored data:
+### Entry Point Único
 
 ```bash
-docker-compose exec cen_db mysql -u cen_user -pcen_password cen_acceso_abierto
+# ✅ Ejecutar TODO el pipeline (extracción + descarga + parsing)
+python pipeline.py
+
+# Solo extracción (solicitudes + documentos de la API)
+python pipeline.py --solo-fetch
+
+# Solo descarga de documentos
+python pipeline.py --solo-download
+
+# Solo parsing de formularios
+python pipeline.py --solo-parse
+
+# Procesar solo un tipo de formulario
+python pipeline.py --tipos SAC
+
+# Limitar documentos (para testing)
+python pipeline.py --limit 100
+
+# Ver qué se haría sin ejecutar
+python pipeline.py --dry-run
 ```
 
-Query examples:
+### Flujo Completo
+
+El pipeline ejecuta estos pasos automáticamente:
+
+```
+1. EXTRACCIÓN (API → BD)
+   ├── Solicitudes por año (2020-2025)
+   └── Documentos de cada solicitud
+
+2. DESCARGA (S3 → local)
+   ├── Formularios SAC
+   ├── Formularios SUCTD
+   └── Formularios FEHACIENTE
+
+3. PARSING (PDF/XLSX → BD estructurada)
+   ├── SAC: 41 campos + metadata
+   ├── SUCTD: 35 campos + metadata
+   └── FEHACIENTE: 30 campos + metadata
+
+4. REPORTE
+   └── Estadísticas completas
+```
+
+## 📊 Estructura de la Base de Datos
+
 ```sql
--- View all fetched data
-SELECT * FROM raw_api_data ORDER BY fetched_at DESC LIMIT 10;
+-- Solicitudes de conexión
+solicitudes (id, nombre_proyecto, potencia_nominal, tecnologia, ...)
 
--- View successful fetches only
-SELECT * FROM successful_fetches LIMIT 10;
+-- Documentos adjuntos
+documentos (id, solicitud_id, nombre, ruta_s3, tipo_documento, ...)
 
--- View latest fetch per URL
-SELECT * FROM latest_fetches;
+-- Formularios parseados (tracking)
+formularios_parseados (id, documento_id, tipo_formulario, parsing_exitoso, ...)
 
--- Count fetches per URL
-SELECT source_url, COUNT(*) as fetch_count
-FROM raw_api_data
-GROUP BY source_url;
+-- Datos estructurados por tipo
+formularios_sac_parsed (razon_social, rut, nombre_proyecto, ...)
+formularios_suctd_parsed (razon_social, rut, nombre_proyecto, ...)
+formularios_fehaciente_parsed (razon_social, rut, nombre_proyecto, ...)
 ```
 
-## Documentation
+**Vistas útiles:**
+- `documentos_ultimas_versiones` - Solo versión más reciente de cada documento
+- `documentos_listos_para_parsear` - Documentos descargados sin parsear
 
-### 📚 Complete Documentation Index
+Ver schema completo en `docs/DATABASE_SCHEMA.md`
 
-- **[CLAUDE.md](CLAUDE.md)** - Complete development guide (architecture, patterns, deployment)
-- **[DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md)** - Database schema, relationships, queries
-- **[API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md)** - CEN API endpoints reference
+## 🔧 Desarrollo
 
-### 🔄 Framework Iterativo de Parsing (IMPORTANTE)
-
-Sistema para mejorar parsers de forma sistemática e iterativa:
-
-- **[docs/framework/FRAMEWORK_ITERATIVO.md](docs/framework/FRAMEWORK_ITERATIVO.md)** - Documentación técnica completa
-- **[docs/framework/GUIA_USO.md](docs/framework/GUIA_USO.md)** - Guía de uso práctica
-
-**Quick Start:**
-```bash
-# Primera iteración (parsear 1000 documentos)
-python -m src.iterative_parse --tipo SUCTD --batch 1000 --iteracion 1
-
-# Ver feedback y errores más comunes
-python -m src.iterative_parse --feedback --iteracion 1 --tipo SUCTD
-
-# Re-parse después de fix al parser
-python -m src.iterative_parse --tipo SUCTD --batch 1000 --iteracion 2 --reparse
-
-# Comparar progreso entre iteraciones
-python -m src.iterative_parse --compare --tipo SUCTD
-```
-
-### 📄 Parsers de Formularios PDF
-
-Documentación del sistema de parseo de formularios SUCTD, SAC y FEHACIENTE:
-
-- **[docs/parsers/PARSER_V2_CHANGELOG.md](docs/parsers/PARSER_V2_CHANGELOG.md)** - Parser v2.0.0 con búsqueda flexible
-- **[docs/parsers/comparativa_bibliotecas.md](docs/parsers/comparativa_bibliotecas.md)** - Comparativa de bibliotecas PDF (pdfplumber, camelot, pypdf)
-
-### 🔍 Investigaciones
-
-- **[docs/investigations/links_perdidos/ANALISIS.md](docs/investigations/links_perdidos/ANALISIS.md)** - Análisis de solicitudes sin formularios parseados
-
-## Project Structure
+### Estructura del Proyecto
 
 ```
 cen-acceso-abierto/
+├── pipeline.py              # ⭐ Entry point único
 ├── src/
-│   ├── main.py              # Orquestador principal
-│   ├── main_cen.py          # Extractor de solicitudes y documentos
-│   ├── iterative_parse.py   # Framework iterativo de parsing
-│   ├── parsers/             # Parsers de formularios (SUCTD, SAC, FEHACIENTE)
-│   ├── extractors/          # Extractores de API
-│   ├── repositories/        # Acceso a base de datos
-│   ├── settings.py          # Configuración
-│   └── http_client.py       # Cliente HTTP con retry
-│
-├── docs/
-│   ├── framework/           # Documentación Framework Iterativo
-│   ├── parsers/             # Documentación de parsers
-│   ├── investigations/      # Análisis e investigaciones
-│   ├── DATABASE_SCHEMA.md   # Schema completo de BD
-│   └── API_DOCUMENTATION.md # Referencia de API CEN
-│
-├── tests/                   # Scripts de testing
-│   ├── test_parser_v2.py
-│   └── test_regression_parser_v2.py
-│
-├── scripts/                 # Scripts utilitarios
-│   ├── reparse_failed.py
-│   └── diagnostic_illimani.py
-│
+│   ├── extractors/         # Extracción desde API
+│   ├── parsers/            # Parsing de PDFs/XLSX
+│   ├── repositories/       # Acceso a base de datos
+│   ├── utils/              # Utilidades (ZIP handler, etc)
+│   ├── batch_download_*.py # Descarga masiva
+│   └── batch_parse_*.py    # Parsing masivo
 ├── db/
-│   ├── init.sql             # Inicialización de BD
-│   ├── schema_*.sql         # Schemas de tablas
-│   ├── migrations/          # Migraciones de BD
-│   └── setup.py             # Script de setup de BD
-│
-├── .env.example             # Variables de entorno de ejemplo
-├── Dockerfile               # Contenedor de aplicación
-├── docker-compose.yml       # Orquestación de servicios
-├── pyproject.toml           # Dependencias Python
-├── deploy.sh                # Script de deployment
-└── CLAUDE.md                # Guía completa de desarrollo
+│   ├── init.sql            # Schema inicial
+│   ├── migrations/         # Migraciones SQL
+│   └── setup.py            # Gestor de migraciones
+├── downloads/              # Documentos descargados
+├── docs/                   # Documentación técnica
+└── archive/                # Scripts obsoletos/debug
 ```
 
-## Configuration
+### Ejecutar Localmente
 
-All configuration is done via environment variables in `.env`:
+```bash
+# Instalar dependencias con uv
+uv sync
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DB_HOST` | Database hostname | `cen_db` |
-| `DB_PORT` | Database port | `3306` |
-| `DB_USER` | Database username | `cen_user` |
-| `DB_PASSWORD` | Database password | `cen_password` |
-| `DB_NAME` | Database name | `cen_acceso_abierto` |
-| `CEN_API_BASE_URL` | CEN Public API base URL | `https://pkb3ax2pkg...` |
-| `CEN_YEARS` | Years to extract (comma-separated) | `2025` |
-| `CEN_DOCUMENT_TYPES` | Document types to filter | `Formulario SUCTD,...` |
-| `REQUEST_TIMEOUT` | HTTP timeout in seconds | `30` |
-| `MAX_RETRIES` | Max retry attempts | `3` |
+# Ejecutar pipeline
+uv run python pipeline.py
 
-## Development
+# O usar Python directamente
+source .venv/bin/activate
+python pipeline.py
+```
 
-### Local Development without Docker
+### Tests
 
-1. **Install uv** (if not already installed):
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+```bash
+# Dry-run (ver qué se haría sin ejecutar)
+python pipeline.py --dry-run
 
-2. **Create virtual environment and install dependencies**:
-   ```bash
-   uv sync
-   ```
+# Procesar solo 10 documentos de cada tipo
+python pipeline.py --limit 10
 
-3. **Activate virtual environment**:
-   ```bash
-   source .venv/bin/activate  # On Unix/macOS
-   # or
-   .venv\Scripts\activate  # On Windows
-   ```
+# Solo SAC con límite
+python pipeline.py --tipos SAC --limit 50
+```
 
-4. **Run the application**:
-   ```bash
-   python -m src.main
-   ```
+## 🔄 Actualizaciones Periódicas
 
-### Running Tests
+```bash
+# Ejecutar cron job diario (ejemplo)
+0 2 * * * cd /path/to/project && docker-compose run --rm cen_app python pipeline.py
 
-*(Testing framework to be added)*
+# O ejecutar manualmente cuando haya nuevas solicitudes
+python pipeline.py
+```
 
-## Production Deployment
+El pipeline detecta automáticamente nuevas solicitudes y solo procesa lo que falta.
 
-For production deployment on the Antumanque server:
+## 📈 Estadísticas Actuales
 
-1. **Update `.env` with production database credentials**:
-   ```env
-   DB_HOST=antumanque.db.hostname
-   DB_USER=production_user
-   DB_PASSWORD=secure_password
-   ```
+**Última ejecución:** 2025-10-28
 
-2. **Build and run** (database service not needed):
-   ```bash
-   docker build -t cen-acceso-abierto .
-   docker run --env-file .env cen-acceso-abierto
-   ```
+| Métrica | Valor |
+|---------|-------|
+| Solicitudes totales | 2,455 |
+| Documentos descargados | 3,244 |
+| Formularios parseados | 1,875 |
+| Tasa de éxito SAC | 72.8% |
+| Tasa de éxito SUCTD | 84.3% |
+| Tasa de éxito FEHACIENTE | 79.4% |
 
-3. **Set up cron** on the server for periodic execution
+**Mejoras recientes:**
+- ✅ Soporte para archivos ZIP (extracción automática)
+- ✅ OCR con Tesseract para PDFs escaneados
+- ✅ Columnas expandidas (RUT, giro, tipo_proyecto)
+- ✅ Extracción progresiva con fallbacks (pdfplumber → pypdf → OCR)
 
-## Troubleshooting
+## 🛠️ Solución de Problemas
 
-### Database Connection Failed
+### Database Connection Error
 
-- Ensure the database service is healthy: `docker-compose ps`
-- Check database logs: `docker-compose logs cen_db`
-- Verify credentials in `.env` match docker-compose.yml
+```bash
+# Verificar que la BD está corriendo
+docker-compose ps
 
-### No Data Fetched
+# Ver logs
+docker-compose logs cen_db
 
-- Verify CEN API configuration in `.env` (`CEN_API_BASE_URL`, `CEN_YEARS`)
-- Test API accessibility: `curl "https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo=6&anio=2025&tipo_solicitud_id=0&solicitud_id=null"`
-- Check application logs for error messages
+# Reiniciar BD
+docker-compose restart cen_db
+```
 
-### API Request Timeout
+### Parsing Errors
 
-- Increase `REQUEST_TIMEOUT` in `.env`
-- Check network connectivity to API endpoints
-- Verify the API endpoints are responding
+```bash
+# Ver errores en la base de datos
+mysql -h 172.29.0.5 -P 3308 -u chris -ppewpew12 cen_acceso_abierto
 
-## Future Extensions
+SELECT parsing_error, COUNT(*)
+FROM formularios_parseados
+WHERE parsing_exitoso = 0
+GROUP BY parsing_error
+ORDER BY COUNT(*) DESC;
+```
 
-This template can be extended for:
+### Migraciones
 
-- **Web Scraping**: Add `src/scraper.py` with BeautifulSoup/Playwright
-- **PDF Parsing**: Add `src/pdf_parser.py` with PyPDF2/pdfplumber
-- **New CEN Endpoints**: Create new extractors in `src/extractors/` following the existing pattern
-- **Data Transformation**: Add parsers in `src/parsers/` for custom transformations
+```bash
+# Ver estado de migraciones
+./deploy.sh --status
 
-## License
+# Ejecutar migraciones pendientes
+./deploy.sh --migrations
 
-*(Add your license here)*
+# Reset completo (⚠️  borra todo)
+./deploy.sh --fresh
+```
 
-## Contributing
+## 📚 Documentación
 
-*(Add contribution guidelines here)*
+- `docs/API_DOCUMENTATION.md` - Endpoints del CEN
+- `docs/DATABASE_SCHEMA.md` - Schema completo de BD
+- `docs/parsers/PARSER_V2_CHANGELOG.md` - Evolución de parsers
+- `CLAUDE.md` - Guía para Claude Code
+
+## 🤝 Contribuir
+
+1. Fork el repositorio
+2. Crear rama feature (`git checkout -b feature/AmazingFeature`)
+3. Commit cambios (`git commit -m 'Add AmazingFeature'`)
+4. Push a la rama (`git push origin feature/AmazingFeature`)
+5. Abrir Pull Request
+
+## 📝 Licencia
+
+Este proyecto es de código abierto y está disponible bajo la licencia MIT.
+
+## 🙏 Agradecimientos
+
+- [CEN Chile](https://www.coordinador.cl/) por la API pública
+- Tesseract OCR para extracción de PDFs escaneados
+- pdfplumber, pypdf, openpyxl para parsing de documentos
+
+---
+
+**Última actualización:** 2025-10-28
+**Versión:** 2.5.0

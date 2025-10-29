@@ -30,6 +30,8 @@ from collections import Counter
 import mysql.connector
 
 from src.parsers.pdf_suctd import SUCTDPDFParser
+from src.parsers.pdf_sac import SACPDFParser
+from src.parsers.pdf_fehaciente import FehacientePDFParser
 from src.settings import get_settings
 
 logging.basicConfig(
@@ -37,6 +39,18 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def get_db_connection():
+    """
+    Crea y retorna una conexión a la base de datos.
+
+    Returns:
+        mysql.connector.connection: Conexión a la base de datos
+    """
+    settings = get_settings()
+    db_config = settings.get_db_config()
+    return mysql.connector.connect(**db_config)
 
 
 def ensure_feedback_table_exists(conn):
@@ -49,31 +63,34 @@ def ensure_feedback_table_exists(conn):
 
         -- Iteración
         iteracion INT NOT NULL,
-        fecha_iteracion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        fecha_parsing TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         parser_version VARCHAR(50),
 
-        -- Estadísticas Generales
+        -- Documento parseado
         tipo_formulario ENUM('SAC', 'SUCTD', 'FEHACIENTE') NOT NULL,
-        total_documentos INT NOT NULL,
-        documentos_exitosos INT NOT NULL,
-        documentos_fallidos INT NOT NULL,
-        tasa_exito DECIMAL(5,2),
+        documento_id BIGINT NOT NULL,
+        solicitud_id BIGINT,
+        nombre_proyecto VARCHAR(500),
 
-        -- Errores Agrupados
-        error_pattern VARCHAR(500),
-        error_count INT,
-        error_sample_ids TEXT,
+        -- Resultado del parsing
+        parse_exitoso BOOLEAN NOT NULL,
+        campos_extraidos INT DEFAULT 0,
+        campos_vacios INT DEFAULT 0,
 
-        -- Campos Faltantes Más Comunes
-        campos_faltantes_top JSON,
+        -- Error (si hubo)
+        error_message TEXT,
+        error_type VARCHAR(200),
 
-        -- Metadata
-        notas TEXT,
-        duracion_segundos INT,
+        -- Tiempos
+        tiempo_segundos DECIMAL(10,3),
 
         INDEX idx_iteracion (iteracion),
         INDEX idx_tipo (tipo_formulario),
-        INDEX idx_fecha (fecha_iteracion)
+        INDEX idx_exitoso (parse_exitoso),
+        INDEX idx_documento (documento_id),
+        INDEX idx_fecha (fecha_parsing),
+
+        FOREIGN KEY (documento_id) REFERENCES documentos(id) ON DELETE CASCADE
     );
     """
 
@@ -98,10 +115,7 @@ def get_documents_to_parse(
     Returns:
         Lista de documentos
     """
-    settings = get_settings()
-    db_config = settings.get_db_config()
-
-    conn = mysql.connector.connect(**db_config)
+    conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     tipo_documento_map = {
@@ -175,19 +189,19 @@ def parse_batch(
     # Inicializar parser
     if tipo == "SUCTD":
         parser = SUCTDPDFParser()
-    # TODO: elif tipo == "SAC": parser = SACPDFParser()
-    # TODO: elif tipo == "FEHACIENTE": parser = FEHACIENTEPDFParser()
+    elif tipo == "SAC":
+        parser = SACPDFParser()
+    elif tipo == "FEHACIENTE":
+        parser = FehacientePDFParser()
     else:
         raise ValueError(f"Tipo no soportado: {tipo}")
 
     # Conexión BD
-    settings = get_settings()
-    db_config = settings.get_db_config()
-    conn = mysql.connector.connect(**db_config)
+    conn = get_db_connection()
 
     exitosos = 0
     fallidos = 0
-    errores_detalle = []
+    errores_detalle = []  # Guardará TODOS los documentos (exitosos + fallidos)
 
     for i, doc in enumerate(docs, 1):
         documento_id = doc['documento_id']
@@ -198,24 +212,42 @@ def parse_batch(
         if i % 100 == 0:
             logger.info(f"  [{i}/{len(docs)}] Progreso: {exitosos} exitosos, {fallidos} fallidos")
 
-        # Verificar archivo existe
+        start_doc_time = datetime.now()
+
+        # Construir ruta completa (agregar downloads/ si es ruta relativa)
         pdf_path = Path(local_path)
+        if not pdf_path.is_absolute():
+            pdf_path = Path("downloads") / local_path
+
+        # Verificar archivo existe
         if not pdf_path.exists():
             fallidos += 1
+            doc_time = (datetime.now() - start_doc_time).total_seconds()
             errores_detalle.append({
                 "documento_id": documento_id,
+                "solicitud_id": solicitud_id,
+                "proyecto": proyecto,
+                "exitoso": False,
                 "error": "Archivo no encontrado",
-                "proyecto": proyecto
+                "campos_extraidos": 0,
+                "campos_vacios": 0,
+                "tiempo": doc_time
             })
             continue
 
         try:
-            # Parsear
-            data = parser.parse(str(pdf_path))
+            # Parsear (pasar solicitud_id para consolidación multi-página)
+            data = parser.parse(str(pdf_path), solicitud_id=solicitud_id)
+
+            # Contar campos extraidos vs vacios
+            campos_extraidos = sum(1 for v in data.values() if v)
+            campos_vacios = len(data) - campos_extraidos
 
             # Validar campos críticos
             critical_fields = ["razon_social", "rut", "nombre_proyecto"]
             missing = [f for f in critical_fields if not data.get(f)]
+
+            doc_time = (datetime.now() - start_doc_time).total_seconds()
 
             if missing:
                 # Parsing fallido
@@ -223,9 +255,13 @@ def parse_batch(
                 error_msg = f"Campos críticos faltantes: {', '.join(missing)}"
                 errores_detalle.append({
                     "documento_id": documento_id,
-                    "error": error_msg,
+                    "solicitud_id": solicitud_id,
                     "proyecto": proyecto,
-                    "campos_faltantes": missing
+                    "exitoso": False,
+                    "error": error_msg,
+                    "campos_extraidos": campos_extraidos,
+                    "campos_vacios": campos_vacios,
+                    "tiempo": doc_time
                 })
 
                 # Guardar en BD (parsing fallido)
@@ -234,16 +270,32 @@ def parse_batch(
                 # Parsing exitoso
                 exitosos += 1
 
+                errores_detalle.append({
+                    "documento_id": documento_id,
+                    "solicitud_id": solicitud_id,
+                    "proyecto": proyecto,
+                    "exitoso": True,
+                    "campos_extraidos": campos_extraidos,
+                    "campos_vacios": campos_vacios,
+                    "tiempo": doc_time
+                })
+
                 # Guardar en BD
                 save_successful_parsing(conn, documento_id, solicitud_id, tipo, data, parser_version)
 
         except Exception as e:
             fallidos += 1
+            doc_time = (datetime.now() - start_doc_time).total_seconds()
             error_msg = str(e)[:500]
             errores_detalle.append({
                 "documento_id": documento_id,
+                "solicitud_id": solicitud_id,
+                "proyecto": proyecto,
+                "exitoso": False,
                 "error": error_msg,
-                "proyecto": proyecto
+                "campos_extraidos": 0,
+                "campos_vacios": 0,
+                "tiempo": doc_time
             })
 
             # Guardar en BD (parsing fallido)
@@ -343,63 +395,69 @@ def save_feedback(
     duracion: int,
     notas: Optional[str] = None
 ):
-    """Guarda feedback de la iteración en BD."""
-    settings = get_settings()
-    db_config = settings.get_db_config()
+    """
+    Guarda feedback de la iteración en BD (un registro por documento).
 
-    conn = mysql.connector.connect(**db_config)
+    errores_detalle debe ser una lista de dicts con:
+    {
+        'documento_id': int,
+        'solicitud_id': int,
+        'proyecto': str,
+        'exitoso': bool,
+        'error': str (opcional),
+        'campos_extraidos': int (opcional),
+        'campos_vacios': int (opcional),
+        'tiempo': float (opcional)
+    }
+    """
+    conn = get_db_connection()
     ensure_feedback_table_exists(conn)
 
     cursor = conn.cursor()
 
-    tasa_exito = (exitosos / total * 100) if total > 0 else 0
-
-    # Agrupar errores por patrón
-    error_counts = Counter([e["error"][:500] for e in errores_detalle])
-    top_error = error_counts.most_common(1)[0] if error_counts else (None, 0)
-
-    # Campos faltantes más comunes
-    campos_faltantes = []
-    for e in errores_detalle:
-        if "campos_faltantes" in e:
-            campos_faltantes.extend(e["campos_faltantes"])
-
-    campos_count = Counter(campos_faltantes)
-    campos_json = json.dumps(dict(campos_count.most_common(10)))
-
-    # Sample IDs del error más común
-    sample_ids = [str(e["documento_id"]) for e in errores_detalle if e["error"][:500] == top_error[0]][:10]
-    sample_ids_str = json.dumps(sample_ids)
-
     insert_query = """
     INSERT INTO parsing_feedback (
         iteracion, parser_version, tipo_formulario,
-        total_documentos, documentos_exitosos, documentos_fallidos,
-        tasa_exito, error_pattern, error_count, error_sample_ids,
-        campos_faltantes_top, notas, duracion_segundos
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        documento_id, solicitud_id, nombre_proyecto,
+        parse_exitoso, campos_extraidos, campos_vacios,
+        error_message, error_type, tiempo_segundos
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
-    cursor.execute(insert_query, (
-        iteracion, parser_version, tipo,
-        total, exitosos, fallidos,
-        tasa_exito, top_error[0], top_error[1], sample_ids_str,
-        campos_json, notas, duracion
-    ))
+    # Insertar cada documento
+    registros_insertados = 0
+    for detalle in errores_detalle:
+        # Extraer tipo de error (primera línea del mensaje)
+        error_msg = detalle.get('error', '')
+        error_type = error_msg.split('\n')[0][:200] if error_msg else None
+
+        cursor.execute(insert_query, (
+            iteracion,
+            parser_version,
+            tipo,
+            detalle['documento_id'],
+            detalle.get('solicitud_id'),
+            detalle.get('proyecto', '')[:500],
+            detalle.get('exitoso', False),
+            detalle.get('campos_extraidos', 0),
+            detalle.get('campos_vacios', 0),
+            error_msg if error_msg else None,
+            error_type,
+            detalle.get('tiempo', 0)
+        ))
+        registros_insertados += 1
 
     conn.commit()
     cursor.close()
     conn.close()
 
-    logger.info("💾 Feedback guardado en BD")
+    logger.info(f"💾 Feedback guardado en BD: {registros_insertados} documentos")
+
 
 
 def show_feedback(iteracion: int, tipo: str):
     """Muestra feedback de una iteración."""
-    settings = get_settings()
-    db_config = settings.get_db_config()
-
-    conn = mysql.connector.connect(**db_config)
+    conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     query = """
@@ -446,10 +504,7 @@ def show_feedback(iteracion: int, tipo: str):
 
 def compare_iterations(tipo: str):
     """Compara todas las iteraciones de un tipo."""
-    settings = get_settings()
-    db_config = settings.get_db_config()
-
-    conn = mysql.connector.connect(**db_config)
+    conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     query = """

@@ -542,7 +542,7 @@ CEN_DOCUMENT_TYPES=Formulario SUCTD,Formulario SAC,Formulario_proyecto_fehacient
 ### Datos Extraídos (Ejemplo: 2025)
 
 - **2,448 solicitudes** de conexión eléctrica
-  - 1,584 SASC (Solicitudes de Acceso y Conexión)
+  - 1,584 SAC (Solicitudes de Acceso y Conexión)
   - 631 SUCT (Uso de Capacidad de Transporte Dedicada)
   - 233 FEHACIENTES (Proyectos Fehacientes)
 - **2,290 documentos** importantes

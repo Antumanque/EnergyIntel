@@ -331,3 +331,256 @@ En esta sesión hemos:
 ---
 
 **¡Excelente progreso! El framework iterativo es la herramienta clave para alcanzar los objetivos del proyecto.**
+
+---
+
+## 🆕 Parser v2.3.0 - Tesseract OCR para PDFs Escaneados
+
+**Fecha**: 2025-10-27
+**Cambio**: Fallback nivel 4 - OCR para PDFs escaneados
+
+### Problema Identificado (Iteración 3)
+
+- **58 documentos fallaron** (de 464 parseados)
+- **Error #1**: "No se detectaron tablas en el PDF" (28 documentos - 48%)
+- **Causa**: PDFs escaneados (imagen-based) sin texto extraíble
+
+### Validación Empírica: Competencia Tesseract vs Método Actual
+
+Ejecutamos competencia head-to-head con los 28 PDFs problemáticos:
+
+```
+┌─────────────────────┬──────────────┬──────────────┐
+│ Métrica             │ Método Actual│ Tesseract OCR│
+├─────────────────────┼──────────────┼──────────────┤
+│ Victorias           │            0 │           23 │
+│ Score Promedio      │         0.0% │        56.0% │
+│ Tiempo Promedio     │       0.00s  │       2.46s  │
+└─────────────────────┴──────────────┴──────────────┘
+```
+
+**Resultado**: OCR ganó 23/28 (82.1%) - **Integración aprobada** ✅
+
+### Solución Implementada
+
+**Estrategia de 4 Niveles de Fallback** (de rápido a lento):
+
+```python
+# Nivel 1: pdfplumber (tablas) ⚡ ~0.5s
+if pdfplumber detecta tablas:
+    parsear con _parse_table()
+else:
+    # Nivel 4a: OCR early (PDFs escaneados sin tablas)
+    if is_scanned_pdf():
+        return _parse_with_ocr()  # ~2.5s
+    else:
+        raise "No se detectaron tablas"
+
+# Si tablas existen pero faltan campos críticos:
+
+# Nivel 2: pypdf (texto plano) ⚡ ~0.3s
+if missing_critical_fields:
+    _parse_with_pypdf_fallback()
+
+# Nivel 3: Hermanos (multi-página) ⚡ ~0.5s
+if still_missing AND solicitud_id:
+    _search_in_sibling_documents()
+
+# Nivel 4b: OCR late (PDFs escaneados con tablas parciales)
+if still_missing:
+    if is_scanned_pdf():
+        _parse_with_ocr()  # ~2.5s
+```
+
+### Nuevos Métodos Agregados
+
+#### 1. `_is_scanned_pdf(pdf_path: str) -> bool`
+
+Detecta PDFs escaneados verificando contenido de texto extraíble:
+
+```python
+text = reader.pages[0].extract_text()
+return len(text.strip()) < 50  # <50 caracteres = escaneado
+```
+
+#### 2. `_parse_with_ocr(pdf_path: str) -> Dict[str, Any]`
+
+Parser completo usando Tesseract OCR:
+
+```python
+# 1. Convertir PDF → imágenes (300 DPI)
+images = convert_from_path(pdf_path, dpi=300)
+
+# 2. OCR con Tesseract (español)
+for image in images:
+    text = pytesseract.image_to_string(image, lang='spa')
+    full_text += text
+
+# 3. Extraer campos con regex
+# (mismo método que pypdf fallback)
+```
+
+### Dependencias Agregadas
+
+```toml
+# pyproject.toml
+dependencies = [
+    "pytesseract>=0.3.13",  # Python wrapper para Tesseract
+    "pillow>=11.0.0",        # Procesamiento imágenes
+    "pdf2image>=1.17.0",     # Conversión PDF → imágenes
+]
+```
+
+**Sistema**: Requiere `tesseract-ocr` binario instalado
+Ver: `scripts/TESSERACT_INSTALL.md`
+
+### Impacto Esperado
+
+| Iteración | Exitosos | Fallidos | Tasa Éxito | Mejora |
+|-----------|----------|----------|------------|--------|
+| Iter 3 (v2.2.0) | 406/464 | 58 | **87.5%** | - |
+| **Iter 4 (v2.3.0)** | **~429/464** | **~35** | **~92.5%** | **+5%** |
+
+**Recuperación esperada**: +23 documentos (los que OCR ganó en competencia)
+
+### Performance
+
+- **OCR Time**: 2.46s/doc promedio
+- **Afecta solo 6%** de documentos (28/464 son escaneados)
+- **Impacto en batch completo**: +1-2 minutos (aceptable para procesamiento por lotes)
+
+### Casos de Uso
+
+**OCR se activa en 2 escenarios**:
+
+1. **Early**: pdfplumber no detecta tablas Y es PDF escaneado
+2. **Late**: Todos los otros métodos (tablas + pypdf + hermanos) fallaron Y es PDF escaneado
+
+**OCR NO se activa si**: PDF tiene texto extraíble (>50 caracteres)
+
+### Archivos Modificados
+
+- **`src/parsers/pdf_suctd.py`**:
+  - Version: `2.2.0` → `2.3.0`
+  - +2 métodos: `_is_scanned_pdf()`, `_parse_with_ocr()`
+  - Integración en `parse()` con detección condicional
+
+### Script de Competencia
+
+- **`scripts/pdf_parsing_competition.py`** - Comparación empírica Tesseract vs Actual
+- **`scripts/TESSERACT_INSTALL.md`** - Guía de instalación
+
+### Próximo Paso
+
+Ejecutar **Iteración 4** con OCR activado:
+
+```bash
+uv run python run_full_pipeline.py --sample 1000 --iteracion 4 --tipos SUCTD
+```
+
+**Validación esperada**:
+- Tasa éxito: 87.5% → 92.5% (+5 puntos)
+- 23 documentos recuperados (error "No se detectaron tablas")
+
+---
+
+## 🆕 Parser v2.4.0 - Extracción Mejorada de RUT (Regex Permisivo)
+
+**Fecha**: 2025-10-27
+**Cambio**: Extracción progresiva de RUT con múltiples estrategias
+
+### Problema Identificado (Iteración 4)
+
+- **31 documentos con "Campos críticos faltantes: rut"** (57.4% de errores en Iter 4)
+- **Causa**: Texto OCR no respeta formato estándar de RUT (puntos desaparecen o se convierten en espacios)
+- **Ejemplo**: PDF tiene `77.116.422-6` pero OCR lee `77 116 422-6`
+
+### Análisis de Calidad OCR (Iteración 4)
+
+De los 23 PDFs recuperados con OCR en Iteración 4:
+- ✅ **nombre_proyecto**: ~87% de tasa de extracción
+- ✅ **razon_social**: ~65% de tasa de extracción
+- ❌ **rut**: ~17% de tasa de extracción (PROBLEMA)
+
+### Solución Implementada
+
+**Nuevo método `_extract_rut_progressive(text: str)`** con 4 estrategias progresivas:
+
+```python
+# Estrategia 1: Formato estricto (con puntos)
+# Patrón: XX.XXX.XXX-X
+r'(\d{1,2}\.\d{3}\.\d{3}-[\dkK])'
+
+# Estrategia 2: Formato sin puntos pero con guión
+# Patrón: XXXXXXXX-X
+r'(\d{7,8}-[\dkK])'
+
+# Estrategia 3: Formato permisivo (espacios o puntos opcionales)
+# Patrón: XX XXX XXX-X o XX.XXX.XXX-X o combinaciones
+r'(\d{1,2})[\.\s]?(\d{3})[\.\s]?(\d{3})-?([\dkK])'
+
+# Estrategia 4: Muy permisivo (solo dígitos + dígito verificador)
+# Patrón: 77116422-6 o 771164226
+r'(\d{7,9})[\s\-]?([\dkK])'
+```
+
+**Lógica de aplicación**:
+1. Intenta estrategia 1 (estricto)
+2. Si falla, intenta estrategia 2
+3. Si falla, intenta estrategia 3 (permisivo)
+4. Si falla, intenta estrategia 4 (muy permisivo)
+5. Normaliza resultado a formato estándar `XX.XXX.XXX-X`
+
+### Dónde Se Aplica
+
+Reemplazado en **3 lugares**:
+1. `_parse_with_pypdf_fallback()` - Texto plano de pypdf
+2. `_search_in_sibling_documents()` - Documentos hermanos
+3. `_parse_with_ocr()` - Texto OCR de Tesseract
+
+### Impacto Esperado
+
+| Métrica | Iteración 4 (v2.3.0) | Iteración 5 (v2.4.0) | Mejora Esperada |
+|---------|---------------------|---------------------|-----------------|
+| Exitosos | 410 | **420-425** | **+10-15 docs** |
+| Tasa Éxito | 88.4% | **90.5-91.6%** | **+2.1-3.2%** |
+
+**Documentos objetivo**: Recuperar de los 31 con "Campos críticos faltantes: rut"
+
+### Casos de Uso Nuevos
+
+**Ahora captura**:
+```python
+# Caso 1: OCR sin puntos
+"77116422-6" → "77.116.422-6" ✅
+
+# Caso 2: OCR con espacios
+"77 116 422-6" → "77.116.422-6" ✅
+
+# Caso 3: OCR mixto
+"77.116 422-6" → "77.116.422-6" ✅
+
+# Caso 4: OCR sin guión
+"771164226" → "77.116.422-6" ✅
+```
+
+### Archivos Modificados
+
+- **`src/parsers/pdf_suctd.py`**:
+  - Version: `2.3.0` → `2.4.0`
+  - +1 método: `_extract_rut_progressive()`
+  - Reemplazados 3 regex de RUT por llamadas al nuevo método
+
+### Próximo Paso
+
+Ejecutar **Iteración 5** con parser v2.4.0:
+
+```bash
+uv run python -m src.iterative_parse --tipo SUCTD --batch 1000 --iteracion 5 --reparse --parser-version 2.4.0
+```
+
+**Validación esperada**:
+- Tasa éxito: 88.4% → 90.5%+ (+2 puntos o más)
+- ~10-15 documentos recuperados de error "rut faltante"
+
+---

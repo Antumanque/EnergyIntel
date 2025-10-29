@@ -216,11 +216,24 @@ observaciones*.md
 PLAN_*.md
 RESUMEN_*.md
 ANALISIS_TEMPORAL*.md
+*_COMPARACION_RESULTADOS.md
+*_OCR_IMPLEMENTADO.md
+REPORTE_*.md
+
+# Backup files
+*.bak
+
+# Archive directory (debug/investigation scripts)
+archive/
 
 # Parser output logs and debugging
 parser_output*.log
 debug_*.txt
 diagnostic_*.txt
+
+# Investigation/comparison scripts (one-time use)
+scripts/compare_*.py
+scripts/pdf_parsing_competition.py
 
 # Downloaded PDFs and documents (keep in downloads/ only)
 *.pdf

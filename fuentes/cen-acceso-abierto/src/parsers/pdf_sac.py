@@ -3,6 +3,14 @@ Parser de Formularios SAC en formato PDF.
 
 Este módulo extrae datos estructurados de formularios SAC (Solicitud de
 Autorización de Conexión) usando pdfplumber para detectar y parsear tablas.
+
+Versión 2.6.0:
+- OCR con Tesseract para PDFs escaneados
+- pypdf fallback para texto plano
+- Extracción progresiva de RUT con múltiples estrategias
+- Extracción progresiva de razón_social (4 estrategias: estricto, permisivo, muy permisivo, keywords)
+- Extracción progresiva de nombre_proyecto (4 estrategias: estricto, permisivo, muy permisivo, alternativo)
+- Verificación de campos críticos post-tabla: activa pypdf fallback si pdfplumber no extrae campos (NUEVA)
 """
 
 import logging
@@ -10,6 +18,21 @@ import re
 from pathlib import Path
 from typing import Dict, Optional, Any
 import pdfplumber
+
+# Importaciones para fallbacks
+try:
+    import pytesseract
+    from PIL import Image
+    import pdf2image
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
+try:
+    import pypdf
+    PYPDF_AVAILABLE = True
+except ImportError:
+    PYPDF_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +47,15 @@ class SACPDFParser:
 
     def __init__(self):
         """Inicializa el parser de SAC."""
-        self.version = "1.0.0"
+        self.version = "2.4.0"  # OCR + pypdf fallback + RUT progresivo
 
-    def parse(self, pdf_path: str) -> Dict[str, Any]:
+    def parse(self, pdf_path: str, solicitud_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Parsea un formulario SAC desde PDF.
 
         Args:
             pdf_path: Ruta al archivo PDF
+            solicitud_id: ID de solicitud (opcional, para multi-página)
 
         Returns:
             Diccionario con datos extraídos del formulario (incluye metadata del PDF)
@@ -66,13 +90,58 @@ class SACPDFParser:
                 # Extraer tabla
                 tables = page.extract_tables()
                 if not tables:
-                    raise ValueError("No se detectaron tablas en el PDF")
+                    # Fallback Nivel 1: pypdf para extraer texto plano
+                    logger.warning("⚠️  No se detectaron tablas, intentando pypdf...")
+                    if PYPDF_AVAILABLE:
+                        data = self._parse_with_pypdf_fallback(pdf_path)
+                        if data and all(data.get(f) for f in ["razon_social", "rut", "nombre_proyecto"]):
+                            data.update(pdf_metadata)
+                            logger.info(f"✅ pypdf - Formulario SAC parseado: {data.get('nombre_proyecto', 'N/A')}")
+                            return data
+
+                    # Fallback Nivel 2: Detectar si es PDF escaneado
+                    logger.warning("⚠️  pypdf no recuperó campos críticos...")
+                    if self._is_scanned_pdf(pdf):
+                        logger.warning("⚠️  PDF escaneado detectado, intentando OCR...")
+                        if TESSERACT_AVAILABLE:
+                            data = self._parse_with_ocr(pdf_path)
+                            if data:
+                                data.update(pdf_metadata)
+                                logger.info(f"✅ OCR - Formulario SAC parseado: {data.get('nombre_proyecto', 'N/A')}")
+                                return data
+                        else:
+                            logger.error("❌ Tesseract no disponible")
+
+                    raise ValueError("No se detectaron tablas en el PDF y OCR no pudo extraer datos")
 
                 table = tables[0]
                 logger.debug(f"Tabla extraída: {len(table)} filas")
 
                 # Parsear datos de la tabla
                 data = self._parse_table(table)
+
+                # Verificar si faltan campos críticos
+                critical_fields = ['razon_social', 'rut', 'nombre_proyecto']
+                missing_critical = [f for f in critical_fields if not data.get(f)]
+
+                # Si faltan campos críticos, intentar fallback con pypdf
+                if missing_critical:
+                    logger.warning(f"⚠️  pdfplumber no encontró campos críticos: {', '.join(missing_critical)}")
+                    logger.warning(f"   Activando pypdf fallback (extracción texto completo + regex progresivo)...")
+
+                    if PYPDF_AVAILABLE:
+                        fallback_data = self._parse_with_pypdf_fallback(pdf_path)
+
+                        # Sobrescribir solo los campos que estaban vacíos
+                        for field in missing_critical:
+                            if fallback_data.get(field):
+                                data[field] = fallback_data[field]
+                                logger.info(f"  ✅ Campo recuperado con pypdf: {field} = {fallback_data[field]}")
+
+                        # Verificar si pypdf recuperó todos los campos
+                        still_missing = [f for f in critical_fields if not data.get(f)]
+                        if still_missing:
+                            logger.warning(f"⚠️  pypdf no pudo recuperar: {', '.join(still_missing)}")
 
                 # Agregar metadata del PDF
                 data.update(pdf_metadata)
@@ -114,7 +183,12 @@ class SACPDFParser:
                 data["razon_social"] = value
 
             elif label == "rut":
-                data["rut"] = value
+                # Intentar extracción progresiva de RUT
+                rut = self._extract_rut_progressive(value) if value else None
+                if rut:
+                    data["rut"] = rut
+                else:
+                    data["rut"] = value  # Fallback al valor original
 
             elif label == "giro":
                 data["giro"] = value
@@ -337,6 +411,326 @@ class SACPDFParser:
                 return None
 
         return None
+
+    def _is_scanned_pdf(self, pdf: pdfplumber.PDF) -> bool:
+        """
+        Detecta si un PDF es escaneado (imagen) vs generado digitalmente.
+
+        Heurística: Si el texto extraíble es muy corto (<50 caracteres),
+        probablemente es un PDF escaneado.
+        """
+        try:
+            full_text = ""
+            for page in pdf.pages:
+                full_text += page.extract_text() or ""
+
+            return len(full_text.strip()) < 50
+        except:
+            return False
+
+    def _parse_with_ocr(self, pdf_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Parsea PDF usando OCR (Tesseract).
+
+        Convierte PDF a imágenes y aplica OCR para extraer texto.
+        """
+        if not TESSERACT_AVAILABLE:
+            return None
+
+        try:
+            # Convertir PDF a imágenes
+            images = pdf2image.convert_from_path(pdf_path, dpi=300)
+
+            full_text = ""
+            for i, image in enumerate(images):
+                logger.debug(f"  Aplicando OCR a página {i+1}...")
+                # OCR con idioma español
+                text = pytesseract.image_to_string(image, lang='spa')
+                full_text += text + "\n\n"
+
+            if not full_text.strip():
+                return None
+
+            # Extraer campos con regex sobre el texto OCR
+            data = {}
+
+            # RUT con extracción progresiva
+            rut = self._extract_rut_progressive(full_text)
+            if rut:
+                data['rut'] = rut
+                logger.debug(f"  ✅ OCR - RUT: {rut}")
+
+            # Razón Social con extracción progresiva
+            razon = self._extract_razon_social_progressive(full_text)
+            if razon:
+                data['razon_social'] = razon
+                logger.debug(f"  ✅ OCR - Razón Social: {razon}")
+
+            # Nombre del Proyecto con extracción progresiva
+            nombre = self._extract_nombre_proyecto_progressive(full_text)
+            if nombre:
+                data['nombre_proyecto'] = nombre
+                logger.debug(f"  ✅ OCR - Nombre Proyecto: {nombre}")
+
+            return data if data else None
+
+        except Exception as e:
+            logger.error(f"❌ Error en OCR: {e}")
+            return None
+
+    def _parse_with_pypdf_fallback(self, pdf_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Parsea PDF usando pypdf (extracción de texto plano).
+
+        Útil para PDFs donde pdfplumber no detecta tablas pero el texto
+        está disponible en formato plano.
+        """
+        if not PYPDF_AVAILABLE:
+            return None
+
+        try:
+            reader = pypdf.PdfReader(pdf_path)
+            full_text = ""
+            for page in reader.pages:
+                full_text += page.extract_text() or ""
+
+            if not full_text.strip():
+                return None
+
+            # Extraer campos con regex sobre el texto plano
+            data = {}
+
+            # RUT con extracción progresiva
+            rut = self._extract_rut_progressive(full_text)
+            if rut:
+                data['rut'] = rut
+                logger.debug(f"  ✅ Campo recuperado con pypdf: rut = {rut}")
+
+            # Razón Social con extracción progresiva
+            razon = self._extract_razon_social_progressive(full_text)
+            if razon:
+                data['razon_social'] = razon
+                logger.debug(f"  ✅ Campo recuperado con pypdf: razon_social = {razon}")
+
+            # Nombre del Proyecto con extracción progresiva
+            nombre = self._extract_nombre_proyecto_progressive(full_text)
+            if nombre:
+                data['nombre_proyecto'] = nombre
+                logger.debug(f"  ✅ Campo recuperado con pypdf: nombre_proyecto = {nombre}")
+
+            return data if data else None
+
+        except Exception as e:
+            logger.error(f"❌ Error en pypdf: {e}")
+            return None
+
+    def _extract_razon_social_progressive(self, text: str) -> Optional[str]:
+        """
+        Extrae razón social con estrategia progresiva (estricto → permisivo → muy permisivo → keywords).
+
+        Estrategias:
+        1. Estricto: Razón Social + mayúscula inicial + caracteres limitados
+        2. Permisivo: Acepta números, &, paréntesis, más stopwords
+        3. Muy permisivo: Captura hasta encontrar RUT o salto de línea doble
+        4. Keywords: Busca patrones como S.A., LTDA, SpA, CIA
+        """
+        if not text:
+            return None
+
+        # Estrategia 1: Formato estricto (actual)
+        razon_match = re.search(
+            r'Razón\s+Social[:\s]*([A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ\s\.,]+?)(?:\n|RUT|Giro)',
+            text, re.IGNORECASE
+        )
+        if razon_match:
+            return razon_match.group(1).strip()
+
+        # Estrategia 2: Formato permisivo (acepta números, &, paréntesis, guiones)
+        razon_match = re.search(
+            r'Razón\s+Social[:\s]*([A-ZÁÉÍÓÚÑ0-9][A-Za-záéíóúñ0-9\s\.,\-&\(\)]+?)(?:\n\n|RUT|Giro|Domicilio|Comuna|Región)',
+            text, re.IGNORECASE
+        )
+        if razon_match:
+            razon = razon_match.group(1).strip()
+            # Validar longitud mínima
+            if len(razon) >= 3:
+                return razon
+
+        # Estrategia 3: Muy permisivo (captura hasta RUT o doble salto)
+        razon_match = re.search(
+            r'Razón\s+Social[:\s]*([^\n]+?)(?=\n\s*(?:RUT|Giro|Domicilio))',
+            text, re.IGNORECASE
+        )
+        if razon_match:
+            razon = razon_match.group(1).strip()
+            if len(razon) >= 3 and len(razon) <= 150:
+                return razon
+
+        # Estrategia 4: Búsqueda por keywords corporativos
+        # Buscar patrones como "ALGO S.A.", "ALGO LTDA", "ALGO SpA"
+        keyword_patterns = [
+            r'([A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.,\-&]+?)\s+S\.?A\.?(?:\s|$|\n)',
+            r'([A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.,\-&]+?)\s+LTDA\.?(?:\s|$|\n)',
+            r'([A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.,\-&]+?)\s+SpA\.?(?:\s|$|\n)',
+            r'([A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.,\-&]+?)\s+C[IÍ]A\.?(?:\s|$|\n)',
+            r'([A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.,\-&]+?)\s+SOCIEDAD\s+AN[OÓ]NIMA(?:\s|$|\n)',
+        ]
+
+        for pattern in keyword_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                razon = match.group(1).strip()
+                # Agregar el tipo societario de vuelta
+                full_match = match.group(0).strip()
+                if len(razon) >= 3 and len(razon) <= 150:
+                    return full_match
+
+        return None
+
+    def _extract_nombre_proyecto_progressive(self, text: str) -> Optional[str]:
+        """
+        Extrae nombre del proyecto con estrategia progresiva.
+
+        Estrategias:
+        0. Header SAC: Busca "Proyecto [NOMBRE] SAC" en headers del documento
+        1. Estricto: "Nombre del Proyecto" + mayúscula inicial
+        2. Permisivo: Acepta más caracteres especiales, más stopwords
+        3. Muy permisivo: Captura hasta encontrar campo siguiente
+        4. Alternativo: Busca "Proyecto:" o "Nombre:"
+        """
+        if not text:
+            return None
+
+        # Estrategia 0: Header "Proyecto [NOMBRE] SAC" (específico para formularios SAC)
+        header_match = re.search(
+            r'Proyecto\s+([A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ0-9\s\.,\-&\(\)]+?)\s+SAC',
+            text, re.IGNORECASE
+        )
+        if header_match:
+            nombre = header_match.group(1).strip()
+            # Validar longitud razonable
+            if 3 <= len(nombre) <= 80:
+                return nombre
+
+        # Estrategia 1: Formato estricto (actual)
+        nombre_match = re.search(
+            r'Nombre\s+del\s+Proyecto[:\s]*([A-ZÁÉÍÓÚÑ][A-Za-záéíóúñ0-9\s\.,\-]+?)(?:\n|Tipo)',
+            text, re.IGNORECASE
+        )
+        if nombre_match:
+            return nombre_match.group(1).strip()
+
+        # Estrategia 2: Formato permisivo (acepta paréntesis, &, más stopwords)
+        nombre_match = re.search(
+            r'Nombre\s+del\s+Proyecto[:\s]*([A-ZÁÉÍÓÚÑ0-9][A-Za-záéíóúñ0-9\s\.,\-&\(\)\"/]+?)(?:\n\n|Tipo|Potencia|Tecnología|Ubicación)',
+            text, re.IGNORECASE
+        )
+        if nombre_match:
+            nombre = nombre_match.group(1).strip()
+            if len(nombre) >= 3:
+                return nombre
+
+        # Estrategia 3: Muy permisivo (captura hasta doble salto o campo siguiente)
+        nombre_match = re.search(
+            r'Nombre\s+del\s+Proyecto[:\s]*([^\n]+?)(?=\n\s*(?:Tipo|Potencia|Tecnología))',
+            text, re.IGNORECASE
+        )
+        if nombre_match:
+            nombre = nombre_match.group(1).strip()
+            if len(nombre) >= 3 and len(nombre) <= 200:
+                return nombre
+
+        # Estrategia 4: Patrones alternativos ("Proyecto:", "Nombre:")
+        alt_patterns = [
+            r'Proyecto[:\s]+([A-Za-záéíóúñÁÉÍÓÚÑ0-9\s\.,\-&\(\)"/]+?)(?:\n\n|Tipo|Potencia)',
+            r'(?:^|\n)Nombre[:\s]+([A-Za-záéíóúñÁÉÍÓÚÑ0-9\s\.,\-&\(\)"/]+?)(?:\n\n|Tipo|Potencia)',
+        ]
+
+        for pattern in alt_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                nombre = match.group(1).strip()
+                if len(nombre) >= 3 and len(nombre) <= 200:
+                    return nombre
+
+        return None
+
+    def _extract_rut_progressive(self, text: str) -> Optional[str]:
+        """
+        Extrae RUT con estrategia progresiva (estricto → permisivo → muy permisivo).
+
+        Estrategias:
+        1. Formato estricto: XX.XXX.XXX-X o XXXXXXXX-X
+        2. Formato permisivo: Acepta espacios o puntos opcionales
+        3. Formato muy permisivo: Solo dígitos + guión
+        """
+        if not text:
+            return None
+
+        # Estrategia 1: Formato estricto (con puntos)
+        rut_match = re.search(r'(\d{1,2}\.\d{3}\.\d{3}-[\dkK])', text)
+        if rut_match:
+            logger.debug(f"  RUT encontrado (estricto): {rut_match.group(0)}")
+            return rut_match.group(0)
+
+        # Estrategia 2: Formato sin puntos pero con guión
+        rut_match = re.search(r'(\d{7,8}-[\dkK])', text)
+        if rut_match:
+            rut_sin_puntos = rut_match.group(0)
+            rut_normalizado = self._normalize_rut(rut_sin_puntos)
+            logger.debug(f"  RUT encontrado (sin puntos): {rut_sin_puntos} → {rut_normalizado}")
+            return rut_normalizado
+
+        # Estrategia 3: Formato permisivo (espacios o puntos opcionales)
+        rut_match = re.search(r'(\d{1,2})[\.\s]?(\d{3})[\.\s]?(\d{3})-?([\dkK])', text)
+        if rut_match:
+            partes = rut_match.groups()
+            rut_reconstruido = f"{partes[0]}.{partes[1]}.{partes[2]}-{partes[3]}"
+            logger.debug(f"  RUT encontrado (permisivo): {rut_match.group(0)} → {rut_reconstruido}")
+            return rut_reconstruido
+
+        # Estrategia 4: Muy permisivo - buscar secuencia de 7-9 dígitos seguidos de K o dígito
+        rut_match = re.search(r'(\d{7,9})[\s\-]?([\dkK])', text)
+        if rut_match:
+            numeros = rut_match.group(1)
+            dv = rut_match.group(2)
+
+            # Validar longitud razonable para RUT chileno
+            if 7 <= len(numeros) <= 8:
+                rut_sin_puntos = f"{numeros}-{dv}"
+                rut_normalizado = self._normalize_rut(rut_sin_puntos)
+                logger.debug(f"  RUT encontrado (muy permisivo): {rut_match.group(0)} → {rut_normalizado}")
+                return rut_normalizado
+
+        return None
+
+    def _normalize_rut(self, rut: str) -> str:
+        """
+        Normaliza RUT al formato estándar XX.XXX.XXX-X.
+
+        Args:
+            rut: RUT sin puntos (ej: "12345678-9")
+
+        Returns:
+            RUT normalizado (ej: "12.345.678-9")
+        """
+        # Remover puntos existentes y espacios
+        rut = rut.replace('.', '').replace(' ', '')
+
+        # Separar número y dígito verificador
+        if '-' in rut:
+            num, dv = rut.split('-')
+        else:
+            num, dv = rut[:-1], rut[-1]
+
+        # Formatear con puntos
+        num = num.zfill(8)  # Pad con ceros a la izquierda si es necesario
+        num_formateado = f"{num[:-6]}.{num[-6:-3]}.{num[-3:]}"
+
+        # Remover ceros iniciales del primer grupo
+        num_formateado = num_formateado.lstrip('0').lstrip('.')
+
+        return f"{num_formateado}-{dv.upper()}"
 
     def _parse_pdf_date(self, date_string: Optional[str]) -> Optional[str]:
         """

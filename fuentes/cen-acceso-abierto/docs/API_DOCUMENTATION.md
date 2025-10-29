@@ -312,7 +312,7 @@ https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo={ti
 
 **Campos principales**:
 - `id`: ID único de la solicitud (usar como `solicitud_id` en tipo=11)
-- `tipo_solicitud_id`: 1=SASC, 2=SUCT, 3=FEHACIENTES
+- `tipo_solicitud_id`: 1=SAC, 2=SUCT, 3=FEHACIENTES
 - `estado_solicitud`: Estado actual del proceso
 - `proyecto`: Nombre del proyecto
 - `proyecto_id`: ID del proyecto
@@ -340,12 +340,12 @@ https://pkb3ax2pkg.execute-api.us-east-2.amazonaws.com/prod/data/public?tipo={ti
   {
     "total": 42,
     "estado": "Desarrollo de estudios y/o antecedentes",
-    "tipo": "SASC"
+    "tipo": "SAC"
   },
   {
     "total": 32,
     "estado": "Rechazada",
-    "tipo": "SASC"
+    "tipo": "SAC"
   }
 ]
 ```

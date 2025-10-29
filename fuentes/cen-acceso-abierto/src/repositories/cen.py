@@ -755,20 +755,37 @@ class CENDatabaseManager:
         """
         from pathlib import Path
 
+        # Manejar archivos ZIP (descomprimir y buscar formulario)
+        zip_handler = None
+        actual_file_path = local_path
+        actual_formato = formato_archivo
+
         try:
+            if formato_archivo == "ZIP":
+                from src.utils.zip_handler import get_formulario_from_zip
+
+                logger.info(f"📦 Archivo ZIP detectado, extrayendo formulario SAC...")
+                result = get_formulario_from_zip(local_path, tipo_formulario='SAC')
+
+                if result is None:
+                    raise ValueError("No se encontró formulario SAC en el archivo ZIP")
+
+                actual_file_path, actual_formato, zip_handler = result
+                logger.info(f"✅ Formulario extraído: {actual_formato}")
+
             # Paso 1: Parsear el archivo (PDF o XLSX)
-            logger.info(f"📄 Parseando documento {documento_id} ({formato_archivo}): {local_path}")
+            logger.info(f"📄 Parseando documento {documento_id} ({actual_formato}): {actual_file_path}")
 
             # Detectar formato si no se especifica (basado en extensión)
-            if formato_archivo == "PDF":
+            if actual_formato == "PDF":
                 from src.parsers.pdf_sac import parse_sac_pdf
-                parsed_data = parse_sac_pdf(local_path)
-            elif formato_archivo in ("XLSX", "XLS"):
+                parsed_data = parse_sac_pdf(actual_file_path)
+            elif actual_formato in ("XLSX", "XLS"):
                 from src.parsers.xlsx_sac import SACXLSXParser
                 parser = SACXLSXParser()
-                parsed_data = parser.parse(local_path)
+                parsed_data = parser.parse(actual_file_path)
             else:
-                raise ValueError(f"Formato no soportado: {formato_archivo}")
+                raise ValueError(f"Formato no soportado: {actual_formato}")
 
             # Paso 2: Validar campos mínimos
             required_fields = ["razon_social", "rut", "nombre_proyecto"]
@@ -782,7 +799,7 @@ class CENDatabaseManager:
                 self.insert_formulario_parseado(
                     documento_id=documento_id,
                     tipo_formulario="SAC",
-                    formato_archivo=formato_archivo,
+                    formato_archivo=actual_formato,
                     parsing_exitoso=False,
                     parser_version=parser_version,
                     parsing_error=error_msg
@@ -811,7 +828,7 @@ class CENDatabaseManager:
                             pdf_creation_date = VALUES(pdf_creation_date),
                             parsed_at = NOW()
                     """, (
-                        documento_id, "SAC", formato_archivo, True, parser_version,
+                        documento_id, "SAC", actual_formato, True, parser_version,
                         parsed_data.get('pdf_producer'),
                         parsed_data.get('pdf_author'),
                         parsed_data.get('pdf_title'),
@@ -911,7 +928,7 @@ class CENDatabaseManager:
                     self.insert_formulario_parseado(
                         documento_id=documento_id,
                         tipo_formulario="SAC",
-                        formato_archivo="PDF",
+                        formato_archivo=actual_formato,
                         parsing_exitoso=False,
                         parser_version=parser_version,
                         parsing_error=error_msg
@@ -926,12 +943,17 @@ class CENDatabaseManager:
             self.insert_formulario_parseado(
                 documento_id=documento_id,
                 tipo_formulario="SAC",
-                formato_archivo="PDF",
+                formato_archivo=actual_formato,
                 parsing_exitoso=False,
                 parser_version=parser_version,
                 parsing_error=error_msg
             )
             return False
+
+        finally:
+            # Limpiar archivos temporales de ZIP si existen
+            if zip_handler is not None:
+                zip_handler.cleanup()
 
 
     def parse_and_store_suctd_document(
@@ -964,19 +986,36 @@ class CENDatabaseManager:
         from pathlib import Path
 
         try:
-            # Paso 1: Parsear el archivo (PDF o XLSX)
+            # Paso 1: Parsear el archivo (PDF, XLSX o ZIP)
             logger.info(f"📄 Parseando documento SUCTD {documento_id} ({formato_archivo}): {local_path}")
 
+            # Manejar archivos ZIP (descomprimir y buscar formulario)
+            zip_handler = None
+            actual_file_path = local_path
+            actual_formato = formato_archivo
+
+            if formato_archivo == "ZIP":
+                from src.utils.zip_handler import get_formulario_from_zip
+
+                logger.info(f"📦 Archivo ZIP detectado, extrayendo formulario SUCTD...")
+                result = get_formulario_from_zip(local_path, tipo_formulario='SUCTD')
+
+                if result is None:
+                    raise ValueError("No se encontró formulario SUCTD en el archivo ZIP")
+
+                actual_file_path, actual_formato, zip_handler = result
+                logger.info(f"✅ Formulario encontrado en ZIP: {Path(actual_file_path).name} ({actual_formato})")
+
             # Detectar formato y parsear
-            if formato_archivo == "PDF":
+            if actual_formato == "PDF":
                 from src.parsers.pdf_suctd import parse_suctd_pdf
-                parsed_data = parse_suctd_pdf(local_path)
-            elif formato_archivo in ("XLSX", "XLS"):
+                parsed_data = parse_suctd_pdf(actual_file_path)
+            elif actual_formato in ("XLSX", "XLS"):
                 from src.parsers.xlsx_suctd import SUCTDXLSXParser
                 parser = SUCTDXLSXParser()
-                parsed_data = parser.parse(local_path)
+                parsed_data = parser.parse(actual_file_path)
             else:
-                raise ValueError(f"Formato no soportado: {formato_archivo}")
+                raise ValueError(f"Formato no soportado: {actual_formato}")
 
             # Paso 2: Validar campos mínimos
             required_fields = ["razon_social", "rut", "nombre_proyecto"]
@@ -990,7 +1029,7 @@ class CENDatabaseManager:
                 self.insert_formulario_parseado(
                     documento_id=documento_id,
                     tipo_formulario="SUCTD",
-                    formato_archivo=formato_archivo,
+                    formato_archivo=actual_formato,
                     parsing_exitoso=False,
                     parser_version=parser_version,
                     parsing_error=error_msg
@@ -1003,6 +1042,7 @@ class CENDatabaseManager:
 
                 try:
                     # 3.1: Insertar tracking en formularios_parseados (con metadata)
+                    # NOTA: Si es ZIP, guardamos el formato extraído (PDF/XLSX), no ZIP
                     cursor.execute("""
                         INSERT INTO formularios_parseados (
                             documento_id, tipo_formulario, formato_archivo,
@@ -1019,7 +1059,7 @@ class CENDatabaseManager:
                             pdf_creation_date = VALUES(pdf_creation_date),
                             parsed_at = NOW()
                     """, (
-                        documento_id, "SUCTD", formato_archivo, True, parser_version,
+                        documento_id, "SUCTD", actual_formato, True, parser_version,
                         parsed_data.get('pdf_producer'),
                         parsed_data.get('pdf_author'),
                         parsed_data.get('pdf_title'),
@@ -1187,11 +1227,12 @@ class CENDatabaseManager:
                     error_msg = f"Error en transacción: {str(e)}"
                     logger.error(f"❌ {error_msg}", exc_info=True)
 
-                    # Registrar parsing FALLIDO
+                    # Registrar parsing FALLIDO (usar actual_formato si ZIP fue extraído)
+                    formato_guardar = actual_formato if 'actual_formato' in locals() else formato_archivo
                     self.insert_formulario_parseado(
                         documento_id=documento_id,
                         tipo_formulario="SUCTD",
-                        formato_archivo=formato_archivo,
+                        formato_archivo=formato_guardar,
                         parsing_exitoso=False,
                         parser_version=parser_version,
                         parsing_error=error_msg
@@ -1202,16 +1243,22 @@ class CENDatabaseManager:
             error_msg = f"Error al parsear SUCTD: {str(e)}"
             logger.error(f"❌ {error_msg}", exc_info=True)
 
-            # Registrar parsing FALLIDO
+            # Registrar parsing FALLIDO (usar actual_formato si ZIP fue extraído)
+            formato_guardar = actual_formato if 'actual_formato' in locals() else formato_archivo
             self.insert_formulario_parseado(
                 documento_id=documento_id,
                 tipo_formulario="SUCTD",
-                formato_archivo=formato_archivo,
+                formato_archivo=formato_guardar,
                 parsing_exitoso=False,
                 parser_version=parser_version,
                 parsing_error=error_msg
             )
             return False
+
+        finally:
+            # Limpiar archivos temporales de ZIP si existen
+            if zip_handler is not None:
+                zip_handler.cleanup()
 
 
     def parse_and_store_fehaciente_document(

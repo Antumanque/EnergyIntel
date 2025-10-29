@@ -15,7 +15,7 @@ SELECT
     tipo_solicitud,
     COUNT(*) AS total_solicitudes
 FROM solicitudes
-WHERE tipo_solicitud IN ('SUCT', 'SASC', 'FEHACIENTES')
+WHERE tipo_solicitud IN ('SUCT', 'SAC', 'FEHACIENTES')
 GROUP BY tipo_solicitud
 ORDER BY tipo_solicitud;
 
@@ -29,7 +29,7 @@ SELECT
     COUNT(d.id) AS total_documentos
 FROM solicitudes s
 INNER JOIN documentos d ON s.id = d.solicitud_id
-WHERE s.tipo_solicitud IN ('SUCT', 'SASC', 'FEHACIENTES')
+WHERE s.tipo_solicitud IN ('SUCT', 'SAC', 'FEHACIENTES')
 GROUP BY s.tipo_solicitud
 ORDER BY s.tipo_solicitud;
 
@@ -42,7 +42,7 @@ SELECT
     COUNT(*) AS solicitudes_sin_documentos
 FROM solicitudes s
 LEFT JOIN documentos d ON s.id = d.solicitud_id
-WHERE s.tipo_solicitud IN ('SUCT', 'SASC', 'FEHACIENTES')
+WHERE s.tipo_solicitud IN ('SUCT', 'SAC', 'FEHACIENTES')
   AND d.id IS NULL
 GROUP BY s.tipo_solicitud
 ORDER BY s.tipo_solicitud;
@@ -59,7 +59,7 @@ SELECT
 FROM solicitudes s
 INNER JOIN documentos d ON s.id = d.solicitud_id
 INNER JOIN formularios_parseados fp ON d.id = fp.documento_id
-WHERE s.tipo_solicitud IN ('SUCT', 'SASC', 'FEHACIENTES')
+WHERE s.tipo_solicitud IN ('SUCT', 'SAC', 'FEHACIENTES')
 GROUP BY s.tipo_solicitud
 ORDER BY s.tipo_solicitud;
 
@@ -74,7 +74,7 @@ SELECT
 FROM solicitudes s
 INNER JOIN documentos d ON s.id = d.solicitud_id
 LEFT JOIN formularios_parseados fp ON d.id = fp.documento_id
-WHERE s.tipo_solicitud IN ('SUCT', 'SASC', 'FEHACIENTES')
+WHERE s.tipo_solicitud IN ('SUCT', 'SAC', 'FEHACIENTES')
   AND fp.id IS NULL
 GROUP BY s.tipo_solicitud, d.tipo_documento
 ORDER BY s.tipo_solicitud, documentos_no_parseados DESC;
@@ -136,7 +136,7 @@ FROM solicitudes s
 INNER JOIN documentos d ON s.id = d.solicitud_id
 INNER JOIN formularios_parseados fp ON d.id = fp.documento_id
 INNER JOIN formularios_sac_parsed sac ON fp.id = sac.formulario_parseado_id
-WHERE s.tipo_solicitud = 'SASC';
+WHERE s.tipo_solicitud = 'SAC';
 
 -- FEHACIENTE
 SELECT
@@ -159,7 +159,7 @@ SELECT
     COUNT(DISTINCT d.solicitud_id) AS solicitudes_unicas
 FROM solicitudes s
 INNER JOIN documentos d ON s.id = d.solicitud_id
-WHERE s.tipo_solicitud IN ('SUCT', 'SASC', 'FEHACIENTES')
+WHERE s.tipo_solicitud IN ('SUCT', 'SAC', 'FEHACIENTES')
 GROUP BY s.tipo_solicitud, d.tipo_documento
 ORDER BY s.tipo_solicitud, cantidad_documentos DESC;
 
@@ -194,7 +194,7 @@ UNION ALL
 FROM solicitudes s
 LEFT JOIN documentos d ON s.id = d.solicitud_id
 LEFT JOIN formularios_parseados fp ON d.id = fp.documento_id
-WHERE s.tipo_solicitud = 'SASC'
+WHERE s.tipo_solicitud = 'SAC'
   AND fp.id IS NULL
 GROUP BY s.id, s.proyecto, s.rut_empresa
 ORDER BY s.id

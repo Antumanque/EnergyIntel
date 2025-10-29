@@ -55,7 +55,7 @@ class SUCTDBatchParser:
             "exitosos": 0,
             "fallidos": 0,
             "errores": [],
-            "por_formato": {"PDF": 0, "XLSX": 0, "XLS": 0}
+            "por_formato": {"PDF": 0, "XLSX": 0, "XLS": 0, "ZIP": 0}
         }
 
     def get_pending_documents(self, limit: int = None) -> List[Dict]:

@@ -17,7 +17,7 @@ WHERE t1.tipo_solicitud='SUCT' AND t2.solicitud_id IS NULL;
 -- SAC: ~600 de 1,584 sin formulario (38%)
 SELECT * FROM solicitudes t1
 LEFT JOIN formularios_sac_parsed t2 ON t1.id=t2.solicitud_id
-WHERE t1.tipo_solicitud='SASC' AND t2.solicitud_id IS NULL;
+WHERE t1.tipo_solicitud='SAC' AND t2.solicitud_id IS NULL;
 
 -- FEHACIENTES: ~84 de 233 sin formulario (36%)
 SELECT * FROM solicitudes t1
@@ -83,7 +83,7 @@ solicitudes → documentos → formularios_parseados → formularios_*_parsed
 | Tipo | Total Solicitudes | Sin Documentos | % |
 |------|-------------------|----------------|---|
 | SUCT | 631 | 41 | 6.5% |
-| SASC | 1,584 | 86 | 5.4% |
+| SAC | 1,584 | 86 | 5.4% |
 | FEHACIENTES | 233 | 9 | 3.9% |
 
 ### Ejemplo Real: Solicitud 143 "Basualto"
@@ -123,7 +123,7 @@ SELECT COUNT(*) FROM documentos WHERE solicitud_id = 143;
 | Tipo | Documentos Totales | No Parseados | % |
 |------|-------------------|--------------|---|
 | SUCT | 648 | 89 | 13.7% |
-| SASC | 1,639 | 170 | 10.4% |
+| SAC | 1,639 | 170 | 10.4% |
 | FEHACIENTES | 256 | 51 | 19.9% |
 
 ### Subdivisión de "No Parseados"
@@ -193,7 +193,7 @@ LIMIT 3;
 | Tipo | Parseados | Exitosos | **Fallidos** | % Falla |
 |------|-----------|----------|--------------|---------|
 | SUCT | 559 | 366 | **193** | 34.5% |
-| SASC | 1,469 | 944 | **521** | 35.5% |
+| SAC | 1,469 | 944 | **521** | 35.5% |
 | FEHACIENTES | 205 | 151 | **54** | 26.3% |
 
 ### Ejemplo Real: Solicitud 1128 "CHE Don Eugenio"
@@ -312,7 +312,7 @@ WHERE s.id IS NULL;
 = 365 CON FORMULARIO ✅ (57.8%)
 ```
 
-### SASC (Solicitudes de Acceso y Conexión)
+### SAC (Solicitudes de Acceso y Conexión)
 
 ```
 1,584 solicitudes totales
@@ -466,7 +466,7 @@ LIMIT 20;
 
 Los registros faltantes se explican completamente:
 
-| Razón | SUCT | SASC | FEHACIENTES | Total |
+| Razón | SUCT | SAC | FEHACIENTES | Total |
 |-------|------|------|-------------|-------|
 | Sin documentos | 41 | 86 | 9 | 136 |
 | Docs sin parsear | 89 | 170 | 51 | 310 |

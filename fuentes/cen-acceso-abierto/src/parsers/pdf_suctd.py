@@ -9,8 +9,9 @@ para detectar y parsear tablas.
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 import pdfplumber
+from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class SUCTDPDFParser:
 
     def __init__(self):
         """Inicializa el parser de SUCTD."""
-        self.version = "2.0.0"  # Versión mejorada con búsqueda flexible
+        self.version = "2.4.0"  # Versión con extracción mejorada de RUT (regex permisivo)
 
     def _find_value_in_row(
         self,
@@ -71,12 +72,14 @@ class SUCTDPDFParser:
                     return idx
         return -1
 
-    def parse(self, pdf_path: str) -> Dict[str, Any]:
+    def parse(self, pdf_path: str, solicitud_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Parsea un formulario SUCTD desde PDF.
 
         Args:
             pdf_path: Ruta al archivo PDF
+            solicitud_id: ID de la solicitud (opcional). Si se proporciona, permite
+                         buscar datos faltantes en documentos hermanos.
 
         Returns:
             Diccionario con datos extraídos del formulario (incluye metadata del PDF)
@@ -115,10 +118,84 @@ class SUCTDPDFParser:
                         all_tables.extend(tables)
 
                 if not all_tables:
-                    raise ValueError("No se detectaron tablas en el PDF")
+                    # No se detectaron tablas - puede ser PDF escaneado
+                    logger.warning("⚠️  No se detectaron tablas en el PDF")
+
+                    # Intentar detectar si es PDF escaneado y aplicar OCR
+                    if self._is_scanned_pdf(pdf_path):
+                        logger.warning(f"⚠️  PDF escaneado detectado, activando OCR...")
+                        data = self._parse_with_ocr(pdf_path)
+
+                        # Agregar metadata y retornar
+                        data.update(pdf_metadata)
+
+                        # Verificar si OCR extrajo campos críticos
+                        critical_fields = ['razon_social', 'rut', 'nombre_proyecto']
+                        campos_extraidos = sum(1 for f in critical_fields if data.get(f))
+
+                        if campos_extraidos == 0:
+                            raise ValueError("No se detectaron tablas en el PDF y OCR no pudo extraer datos")
+
+                        logger.info(f"✅ Formulario SUCTD parseado con OCR: {data.get('nombre_proyecto', 'N/A')}")
+                        return data
+                    else:
+                        raise ValueError("No se detectaron tablas en el PDF")
 
                 # Parsear datos de la primera tabla (o combinar todas)
                 data = self._parse_table(all_tables[0])
+
+                # Verificar si faltan campos críticos
+                critical_fields = ['razon_social', 'rut', 'nombre_proyecto']
+                missing_critical = [f for f in critical_fields if not data.get(f)]
+
+                # Si faltan campos críticos, intentar fallback con pypdf
+                if missing_critical:
+                    logger.warning(f"⚠️  pdfplumber no encontró campos críticos: {', '.join(missing_critical)}")
+                    fallback_data = self._parse_with_pypdf_fallback(pdf_path)
+
+                    # Sobrescribir solo los campos que estaban vacíos
+                    for field in missing_critical:
+                        if fallback_data.get(field):
+                            data[field] = fallback_data[field]
+                            logger.info(f"✅ Campo recuperado con pypdf: {field} = {fallback_data[field]}")
+
+                    # Actualizar lista de campos aún faltantes
+                    missing_critical = [f for f in critical_fields if not data.get(f)]
+
+                    # Si aún faltan campos Y tenemos solicitud_id, buscar en hermanos
+                    if missing_critical and solicitud_id:
+                        # Extraer ruta base (sin downloads/)
+                        base_path = str(Path(pdf_path).relative_to('downloads')) if 'downloads' in pdf_path else pdf_path
+
+                        sibling_data = self._search_in_sibling_documents(
+                            solicitud_id=solicitud_id,
+                            missing_fields=missing_critical,
+                            base_path=base_path
+                        )
+
+                        # Sobrescribir solo los campos que estaban vacíos
+                        for field in missing_critical:
+                            if sibling_data.get(field):
+                                data[field] = sibling_data[field]
+                                logger.info(f"✅ Campo recuperado de hermano: {field} = {sibling_data[field]}")
+
+                        # Actualizar lista de campos aún faltantes
+                        missing_critical = [f for f in critical_fields if not data.get(f)]
+
+                    # Si AÚN faltan campos, intentar OCR (solo si es PDF escaneado)
+                    if missing_critical:
+                        # Detectar si es PDF escaneado
+                        if self._is_scanned_pdf(pdf_path):
+                            logger.warning(f"⚠️  PDF escaneado detectado, activando OCR...")
+                            ocr_data = self._parse_with_ocr(pdf_path)
+
+                            # Sobrescribir solo los campos que estaban vacíos
+                            for field in missing_critical:
+                                if ocr_data.get(field):
+                                    data[field] = ocr_data[field]
+                                    logger.info(f"✅ Campo recuperado con OCR: {field} = {ocr_data[field]}")
+                        else:
+                            logger.info("  PDF con texto extraíble, OCR no necesario")
 
                 # Agregar metadata del PDF
                 data.update(pdf_metadata)
@@ -129,6 +206,335 @@ class SUCTDPDFParser:
         except Exception as e:
             logger.error(f"❌ Error al parsear SUCTD: {str(e)}", exc_info=True)
             raise
+
+    def _parse_with_pypdf_fallback(self, pdf_path: str) -> Dict[str, Any]:
+        """
+        Fallback parser usando pypdf para extracción de texto plano.
+
+        Útil cuando pdfplumber detecta tablas pero no puede parsearlas correctamente
+        (por ejemplo, cuando todas las celdas están merged en una sola).
+
+        Busca patrones de texto específicos:
+        - "Proyecto <nombre>"
+        - "Empresa <razón social>"
+        - RUT en formato XX.XXX.XXX-X
+
+        Args:
+            pdf_path: Ruta al archivo PDF
+
+        Returns:
+            Diccionario con campos extraídos del texto plano
+        """
+        logger.info("🔄 Intentando fallback con pypdf...")
+
+        data = {}
+
+        try:
+            reader = PdfReader(pdf_path)
+            full_text = ""
+
+            # Extraer todo el texto
+            for page in reader.pages:
+                full_text += page.extract_text()
+
+            # Buscar campos con regex
+
+            # Proyecto: "Proyecto XXXXXX SUCTD" o "Proyecto XXXXXX"
+            proyecto_match = re.search(r'Proyecto\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\-\.]+?)(?:\s+SUCTD|\s+Empresa|\n|$)', full_text, re.IGNORECASE)
+            if proyecto_match:
+                data['nombre_proyecto'] = proyecto_match.group(1).strip()
+
+            # Empresa: "Empresa XXXXXX"
+            empresa_match = re.search(r'Empresa\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.\-,&]+?)(?:\s+\d{2}-\d{2}-\d{4}|\n|$)', full_text, re.IGNORECASE)
+            if empresa_match:
+                data['razon_social'] = empresa_match.group(1).strip()
+
+            # RUT: Extracción progresiva (estricto → permisivo)
+            rut = self._extract_rut_progressive(full_text)
+            if rut:
+                data['rut'] = rut
+
+            # Fecha: DD-MM-YYYY
+            fecha_match = re.search(r'(\d{2}-\d{2}-\d{4})', full_text)
+            if fecha_match:
+                data['fecha'] = fecha_match.group(1)
+
+            logger.info(f"✅ Fallback pypdf extrajo: proyecto={data.get('nombre_proyecto', 'N/A')}, empresa={data.get('razon_social', 'N/A')}")
+
+            return data
+
+        except Exception as e:
+            logger.error(f"❌ Error en fallback pypdf: {str(e)}")
+            return data
+
+    def _search_in_sibling_documents(
+        self,
+        solicitud_id: int,
+        missing_fields: List[str],
+        base_path: str
+    ) -> Dict[str, Any]:
+        """
+        Busca campos faltantes en documentos hermanos del mismo solicitud_id.
+
+        Útil para formularios multi-página donde los datos están distribuidos
+        entre varios PDFs (ej: "1 de 2", "2 de 2").
+
+        Args:
+            solicitud_id: ID de la solicitud
+            missing_fields: Lista de campos que faltan
+            base_path: Ruta base del documento actual
+
+        Returns:
+            Diccionario con campos encontrados en documentos hermanos
+        """
+        logger.info(f"🔍 Buscando {', '.join(missing_fields)} en documentos hermanos de solicitud {solicitud_id}")
+
+        data = {}
+
+        try:
+            from src.iterative_parse import get_db_connection
+
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+
+            # Buscar otros documentos SUCTD del mismo solicitud_id
+            query = """
+            SELECT local_path
+            FROM documentos
+            WHERE solicitud_id = %s
+              AND tipo_documento = 'Formulario SUCTD'
+              AND downloaded = 1
+              AND local_path != %s
+            ORDER BY local_path
+            """
+
+            cursor.execute(query, (solicitud_id, base_path))
+            siblings = cursor.fetchall()
+
+            cursor.close()
+            conn.close()
+
+            logger.info(f"  Encontrados {len(siblings)} documentos hermanos")
+
+            # Parsear cada hermano buscando los campos faltantes
+            for sibling in siblings:
+                sibling_path = Path('downloads') / sibling['local_path']
+
+                if not sibling_path.exists():
+                    continue
+
+                logger.info(f"  Parseando: {sibling_path.name}")
+
+                # Usar pypdf para extraer texto del hermano
+                reader = PdfReader(str(sibling_path))
+                full_text = ''
+                for page in reader.pages:
+                    full_text += page.extract_text() + '\n'
+
+                # Buscar campos específicos que faltan
+                if 'rut' in [f.lower() for f in missing_fields]:
+                    # RUT: Extracción progresiva (estricto → permisivo)
+                    rut = self._extract_rut_progressive(full_text)
+                    if rut:
+                        data['rut'] = rut
+                        logger.info(f"  ✅ RUT encontrado: {data['rut']}")
+
+                if 'razon_social' in [f.lower() for f in missing_fields]:
+                    empresa_match = re.search(r'Empresa\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.\-,&]+?)(?:\s+\d{2}-\d{2}-\d{4}|\n|$)', full_text, re.IGNORECASE)
+                    if empresa_match:
+                        data['razon_social'] = empresa_match.group(1).strip()
+                        logger.info(f"  ✅ Empresa encontrada: {data['razon_social']}")
+
+                if 'nombre_proyecto' in [f.lower() for f in missing_fields]:
+                    proyecto_match = re.search(r'Proyecto\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\-\.]+?)(?:\s+SUCTD|\s+Empresa|\n|$)', full_text, re.IGNORECASE)
+                    if proyecto_match:
+                        data['nombre_proyecto'] = proyecto_match.group(1).strip()
+                        logger.info(f"  ✅ Proyecto encontrado: {data['nombre_proyecto']}")
+
+                # Si ya encontramos todos los campos, salir
+                found_all = all(data.get(f.lower()) for f in missing_fields)
+                if found_all:
+                    logger.info(f"  ✅ Todos los campos encontrados, deteniendo búsqueda")
+                    break
+
+            return data
+
+        except Exception as e:
+            logger.error(f"❌ Error buscando en hermanos: {str(e)}")
+            return data
+
+    def _extract_rut_progressive(self, text: str) -> Optional[str]:
+        """
+        Extrae RUT con estrategia progresiva (estricto → permisivo → muy permisivo).
+
+        Útil para texto OCR donde los puntos pueden desaparecer o convertirse en espacios.
+
+        Estrategias:
+        1. Formato estricto: XX.XXX.XXX-X o XXXXXXXX-X
+        2. Formato permisivo: Acepta espacios o puntos opcionales
+        3. Formato muy permisivo: Solo dígitos + guión
+
+        Args:
+            text: Texto donde buscar el RUT
+
+        Returns:
+            RUT normalizado en formato XX.XXX.XXX-X o None
+        """
+        # Estrategia 1: Formato estricto (con puntos)
+        rut_match = re.search(r'(\d{1,2}\.\d{3}\.\d{3}-[\dkK])', text)
+        if rut_match:
+            logger.debug(f"  RUT encontrado (estricto): {rut_match.group(0)}")
+            return rut_match.group(0)
+
+        # Estrategia 2: Formato sin puntos pero con guión
+        rut_match = re.search(r'(\d{7,8}-[\dkK])', text)
+        if rut_match:
+            rut_sin_puntos = rut_match.group(0)
+            rut_normalizado = self._normalize_rut(rut_sin_puntos)
+            logger.debug(f"  RUT encontrado (sin puntos): {rut_sin_puntos} → {rut_normalizado}")
+            return rut_normalizado
+
+        # Estrategia 3: Formato permisivo (espacios o puntos opcionales)
+        # Patrón: XX XXX XXX-X o XX.XXX.XXX-X o combinaciones
+        rut_match = re.search(r'(\d{1,2})[\.\s]?(\d{3})[\.\s]?(\d{3})-?([\dkK])', text)
+        if rut_match:
+            # Reconstruir con formato estándar
+            partes = rut_match.groups()
+            rut_reconstruido = f"{partes[0]}.{partes[1]}.{partes[2]}-{partes[3]}"
+            logger.debug(f"  RUT encontrado (permisivo): {rut_match.group(0)} → {rut_reconstruido}")
+            return rut_reconstruido
+
+        # Estrategia 4: Muy permisivo - buscar secuencia de 7-9 dígitos seguidos de K o dígito
+        # Ejemplo: "77116422-6" o "771164226"
+        rut_match = re.search(r'(\d{7,9})[\s\-]?([\dkK])', text)
+        if rut_match:
+            numeros = rut_match.group(1)
+            dv = rut_match.group(2)
+
+            # Validar que tiene sentido como RUT (longitud correcta)
+            if 7 <= len(numeros) <= 8:
+                rut_sin_puntos = f"{numeros}-{dv}"
+                rut_normalizado = self._normalize_rut(rut_sin_puntos)
+                logger.debug(f"  RUT encontrado (muy permisivo): {rut_match.group(0)} → {rut_normalizado}")
+                return rut_normalizado
+
+        return None
+
+    def _is_scanned_pdf(self, pdf_path: str) -> bool:
+        """
+        Detecta si un PDF es escaneado (imagen-based) con bajo contenido de texto.
+
+        Estrategia: Intenta extraer texto de la primera página.
+        Si extrae menos de 50 caracteres, es probablemente un PDF escaneado.
+
+        Args:
+            pdf_path: Ruta al archivo PDF
+
+        Returns:
+            True si es PDF escaneado, False si tiene texto extraíble
+        """
+        try:
+            reader = PdfReader(pdf_path)
+            if len(reader.pages) == 0:
+                return False
+
+            # Extraer texto de primera página
+            text = reader.pages[0].extract_text()
+            text_length = len(text.strip())
+
+            logger.debug(f"  Longitud texto extraído página 1: {text_length} caracteres")
+
+            # Umbral: <50 caracteres = PDF escaneado
+            return text_length < 50
+
+        except Exception as e:
+            logger.warning(f"⚠️  Error detectando si es PDF escaneado: {str(e)}")
+            return False
+
+    def _parse_with_ocr(self, pdf_path: str) -> Dict[str, Any]:
+        """
+        Parser usando Tesseract OCR para PDFs escaneados (imagen-based).
+
+        Proceso:
+        1. Convierte PDF a imágenes (pdf2image) con 300 DPI
+        2. Aplica OCR con Tesseract (idioma español)
+        3. Extrae campos con regex sobre texto OCR
+
+        Args:
+            pdf_path: Ruta al archivo PDF
+
+        Returns:
+            Diccionario con campos extraídos del texto OCR
+        """
+        logger.info("🔄 Intentando OCR con Tesseract (PDF escaneado detectado)...")
+
+        data = {}
+
+        try:
+            import pytesseract
+            from pdf2image import convert_from_path
+
+            # Convertir PDF a imágenes (300 DPI para buena calidad)
+            images = convert_from_path(pdf_path, dpi=300)
+            logger.info(f"  Convertidas {len(images)} páginas a imágenes")
+
+            # Aplicar OCR a cada página
+            full_text = ""
+            for i, image in enumerate(images, 1):
+                logger.debug(f"  Aplicando OCR a página {i}/{len(images)}...")
+                text = pytesseract.image_to_string(image, lang='spa')
+                full_text += text + "\n"
+
+            logger.info(f"  OCR extrajo {len(full_text)} caracteres")
+
+            # Extraer campos con regex (mismo método que pypdf fallback)
+
+            # Proyecto: "Proyecto XXXXXX"
+            proyecto_match = re.search(
+                r'Proyecto\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\-\.]+?)(?:\s+SUCTD|\s+Empresa|\n|$)',
+                full_text,
+                re.IGNORECASE
+            )
+            if proyecto_match:
+                data['nombre_proyecto'] = proyecto_match.group(1).strip()
+                logger.info(f"  ✅ OCR - Proyecto: {data['nombre_proyecto']}")
+
+            # Empresa: "Empresa XXXXXX"
+            empresa_match = re.search(
+                r'Empresa\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ0-9\s\.\-,&]+?)(?:\s+\d{2}-\d{2}-\d{4}|\n|$)',
+                full_text,
+                re.IGNORECASE
+            )
+            if empresa_match:
+                data['razon_social'] = empresa_match.group(1).strip()
+                logger.info(f"  ✅ OCR - Empresa: {data['razon_social']}")
+
+            # RUT: Extracción progresiva (estricto → permisivo)
+            rut = self._extract_rut_progressive(full_text)
+            if rut:
+                data['rut'] = rut
+                logger.info(f"  ✅ OCR - RUT: {data['rut']}")
+
+            # Fecha: DD-MM-YYYY
+            fecha_match = re.search(r'(\d{2}-\d{2}-\d{4})', full_text)
+            if fecha_match:
+                data['fecha'] = fecha_match.group(1)
+
+            if not data:
+                logger.warning("⚠️  OCR no pudo extraer ningún campo")
+            else:
+                logger.info(f"✅ OCR extrajo {len(data)} campo(s)")
+
+            return data
+
+        except ImportError as e:
+            logger.error(f"❌ Tesseract no está instalado o falta dependencia: {e}")
+            logger.info("   Ver scripts/TESSERACT_INSTALL.md para instrucciones de instalación")
+            return {}
+
+        except Exception as e:
+            logger.error(f"❌ Error en OCR: {str(e)}")
+            return {}
 
     def _parse_table(self, table: list) -> Dict[str, Any]:
         """
