@@ -108,13 +108,18 @@ class ProyectosRepository:
 
         params_list = []
         for result in extraction_results:
-            # Preparar data JSON
+            # Preparar data JSON - asegurar que sea string JSON válido
             data_json = None
             if result.get("data") is not None:
                 if isinstance(result["data"], dict):
-                    data_json = json.dumps(result["data"], ensure_ascii=False)
-                else:
+                    # Convertir a JSON string sin ensure_ascii=False para evitar problemas
+                    data_json = json.dumps(result["data"])
+                elif isinstance(result["data"], str):
+                    # Si ya es string, usarlo tal cual
                     data_json = result["data"]
+                else:
+                    # Si es bytes, decodificar primero
+                    data_json = result["data"].decode('utf-8') if isinstance(result["data"], bytes) else str(result["data"])
 
             params_list.append(
                 (
@@ -167,36 +172,9 @@ class ProyectosRepository:
             logger.warning("No hay proyectos para insertar")
             return 0, 0
 
-        # Primero deduplicar dentro del batch (la API puede devolver duplicados)
-        seen_ids = set()
-        unique_proyectos = []
-        for p in proyectos:
-            pid = p.get("expediente_id")
-            if pid not in seen_ids:
-                seen_ids.add(pid)
-                unique_proyectos.append(p)
-
-        batch_duplicates = len(proyectos) - len(unique_proyectos)
-        if batch_duplicates > 0:
-            logger.info(f"Removed {batch_duplicates} duplicates within batch")
-
-        # Obtener IDs existentes
-        existing_ids = self.get_existing_expediente_ids()
-
-        # Filtrar solo proyectos nuevos
-        new_proyectos = [
-            p for p in unique_proyectos if p.get("expediente_id") not in existing_ids
-        ]
-        num_duplicated = len(unique_proyectos) - len(new_proyectos)
-
-        if num_duplicated > 0:
-            logger.info(
-                f"Skipping {num_duplicated} duplicate proyectos (already in database)"
-            )
-
-        if not new_proyectos:
-            logger.info("No new proyectos to insert (all were duplicates)")
-            return 0, num_duplicated
+        # Sin deduplicación - confiamos en el offset correcto de la API
+        # La tabla tiene UNIQUE constraint en expediente_id por seguridad
+        new_proyectos = proyectos
 
         # Preparar query de inserción
         query = """
@@ -214,6 +192,8 @@ class ProyectosRepository:
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
+            ON DUPLICATE KEY UPDATE
+                fetched_at = NOW()
         """
 
         # Preparar parámetros
@@ -254,8 +234,9 @@ class ProyectosRepository:
 
         # Ejecutar inserción en bulk
         self.db.execute_many(query, params_list, commit=True)
-        logger.info(f"Inserted {len(params_list)} new proyectos")
-        return len(params_list), num_duplicated
+        num_inserted = len(params_list)
+        logger.info(f"Inserted {num_inserted} proyectos")
+        return num_inserted, 0  # 0 duplicados ya que confiamos en el offset correcto
 
     def get_proyecto_by_id(self, expediente_id: int) -> dict | None:
         """

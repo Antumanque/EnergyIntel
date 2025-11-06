@@ -45,15 +45,16 @@ class ResumenEjecutivoLinksRepository:
             INSERT INTO resumen_ejecutivo_links (
                 id_documento, pdf_url, pdf_filename, texto_link,
                 documento_firmado_url, documento_firmado_docid,
-                extracted_at, status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                extracted_at, status, match_criteria
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 pdf_url = VALUES(pdf_url),
                 pdf_filename = VALUES(pdf_filename),
                 texto_link = VALUES(texto_link),
                 documento_firmado_url = VALUES(documento_firmado_url),
                 documento_firmado_docid = VALUES(documento_firmado_docid),
-                extracted_at = VALUES(extracted_at)
+                extracted_at = VALUES(extracted_at),
+                match_criteria = VALUES(match_criteria)
         """
 
         params = (
@@ -65,6 +66,7 @@ class ResumenEjecutivoLinksRepository:
             link.get("documento_firmado_docid"),
             link["extracted_at"],
             link.get("status", "pending"),
+            link.get("match_criteria"),
         )
 
         row_id = self.db.insert_and_get_id(query, params)
@@ -92,15 +94,16 @@ class ResumenEjecutivoLinksRepository:
             INSERT INTO resumen_ejecutivo_links (
                 id_documento, pdf_url, pdf_filename, texto_link,
                 documento_firmado_url, documento_firmado_docid,
-                extracted_at, status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                extracted_at, status, match_criteria
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 pdf_url = VALUES(pdf_url),
                 pdf_filename = VALUES(pdf_filename),
                 texto_link = VALUES(texto_link),
                 documento_firmado_url = VALUES(documento_firmado_url),
                 documento_firmado_docid = VALUES(documento_firmado_docid),
-                extracted_at = VALUES(extracted_at)
+                extracted_at = VALUES(extracted_at),
+                match_criteria = VALUES(match_criteria)
         """
 
         params_list = []
@@ -114,6 +117,7 @@ class ResumenEjecutivoLinksRepository:
                 link.get("documento_firmado_docid"),
                 link["extracted_at"],
                 link.get("status", "pending"),
+                link.get("match_criteria"),
             ))
 
         self.db.execute_many(query, params_list, commit=True)

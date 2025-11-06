@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
 """
-🚀 CEN Acceso Abierto - Pipeline Completo Automatizado
+🚀 CEN Acceso Abierto - Pipeline Completo Automatizado con Reproceso
 
 Entry point único que ejecuta el pipeline completo end-to-end:
+
+COMPORTAMIENTO POR DEFECTO (INCREMENTAL + REPROCESO):
 1. Extracción de solicitudes (incremental, solo nuevas)
 2. Extracción de documentos (incremental, solo de solicitudes nuevas)
-3. Descarga de documentos (solo pendientes)
-4. Parsing de formularios (SAC, SUCTD, FEHACIENTE) - solo pendientes
+3. RE-EXTRACCIÓN de documentos para solicitudes sin documentos (fallidas previamente)
+4. Descarga de documentos pendientes (downloaded = 0)
+5. Parsing de formularios (SAC, SUCTD, FEHACIENTE) - incluye reproceso de fallidos
 
 CARACTERÍSTICAS:
 - ✅ Idempotente: Se puede ejecutar múltiples veces sin duplicar datos
 - ✅ Incremental: Solo procesa datos nuevos
+- ✅ Reproceso automático: Re-procesa todo lo que falló en stages anteriores
 - ✅ Append-only: Nunca actualiza ni borra, solo inserta
 - ✅ Detección automática: Si no hay datos, carga desde 0
 - ✅ Estadísticas completas: Reporte detallado al final
 
 EJEMPLO DE USO:
-    # Ejecutar todo el pipeline
+    # Ejecutar todo el pipeline (nuevos + reproceso de fallidos)
     python pipeline.py
 
-    # Solo extracción (solicitudes + documentos)
+    # Solo extracción (solicitudes + documentos + reproceso)
     python pipeline.py --solo-fetch
 
-    # Solo descarga
+    # Solo descarga (incluye pendientes + fallidos)
     python pipeline.py --solo-download
 
-    # Solo parsing
+    # Solo parsing (incluye pendientes + fallidos)
     python pipeline.py --solo-parse
 
     # Limitar documentos a procesar
@@ -37,7 +41,7 @@ EJEMPLO DE USO:
     # Modo dry-run (ver qué se haría sin ejecutar)
     python pipeline.py --dry-run
 
-Fecha: 2025-10-28
+Fecha: 2025-11-06 (Actualizado con reproceso automático)
 """
 
 import argparse
@@ -61,8 +65,15 @@ class PipelineOrchestrator:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.stats = {
+            # Extracción de nuevos
             "solicitudes_nuevas": 0,
             "documentos_nuevos": 0,
+
+            # Reproceso
+            "solicitudes_sin_docs_reprocesadas": 0,
+            "documentos_reextraidos": 0,
+
+            # Descarga y parsing
             "documentos_descargados": 0,
             "formularios_parseados": {
                 "SAC": 0,
@@ -101,11 +112,11 @@ class PipelineOrchestrator:
             return 0
 
         try:
-            from src.extractors.solicitudes import SolicitudesExtractor
+            from src.extractors.solicitudes import get_solicitudes_extractor
             from src.settings import get_settings
 
             settings = get_settings()
-            extractor = SolicitudesExtractor()
+            extractor = get_solicitudes_extractor()
 
             # Extraer solicitudes por año
             total_nuevas = 0
@@ -137,9 +148,9 @@ class PipelineOrchestrator:
             return 0
 
         try:
-            from src.extractors.solicitudes import SolicitudesExtractor
+            from src.extractors.solicitudes import get_solicitudes_extractor
 
-            extractor = SolicitudesExtractor()
+            extractor = get_solicitudes_extractor()
             total_nuevos = extractor.extract_documentos_all_solicitudes()
 
             logger.info(f"\n✅ Total documentos nuevos: {total_nuevos}")
@@ -148,6 +159,53 @@ class PipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"❌ Error en extracción de documentos: {e}", exc_info=True)
+            raise
+
+    def step_2b_reextract_documentos_solicitudes_sin_docs(self) -> int:
+        """
+        RE-EXTRAE documentos de solicitudes que NO TIENEN documentos en la BD.
+
+        Estas son solicitudes que fallaron en el paso de extracción de documentos
+        en ejecuciones anteriores.
+
+        Returns:
+            Número de solicitudes reprocesadas
+        """
+        self.print_section("PASO 2B: Re-extracción de Documentos para Solicitudes Sin Documentos")
+
+        if self.dry_run:
+            logger.info("🔍 [DRY RUN] Se re-extraerían documentos de solicitudes sin docs...")
+            return 0
+
+        try:
+            from src.repositories.cen import get_cen_db_manager
+
+            db_manager = get_cen_db_manager()
+
+            # Obtener solicitudes sin documentos
+            solicitudes_sin_docs = db_manager.get_solicitudes_sin_documentos()
+
+            if not solicitudes_sin_docs:
+                logger.info("✅ Todas las solicitudes tienen documentos extraídos")
+                return 0
+
+            logger.info(f"🔄 Encontradas {len(solicitudes_sin_docs)} solicitudes sin documentos")
+            logger.info(f"🔄 Re-procesando extracción de documentos...")
+
+            from src.extractors.solicitudes import get_solicitudes_extractor
+            extractor = get_solicitudes_extractor()
+
+            # Re-extraer documentos de estas solicitudes
+            result = extractor.extract_documentos_for_solicitudes(solicitudes_sin_docs)
+
+            total_reextraidos = result.get("documentos_importantes", 0)
+            logger.info(f"\n✅ Documentos re-extraídos: {total_reextraidos}")
+            self.stats["documentos_reextraidos"] = total_reextraidos
+            self.stats["solicitudes_sin_docs_reprocesadas"] = len(solicitudes_sin_docs)
+            return len(solicitudes_sin_docs)
+
+        except Exception as e:
+            logger.error(f"❌ Error en re-extracción de documentos: {e}", exc_info=True)
             raise
 
     # =========================================================================
@@ -274,18 +332,24 @@ class PipelineOrchestrator:
         print(f"⏱️  Tiempo total: {elapsed_seconds:.1f} segundos ({elapsed_seconds/60:.1f} minutos)\n")
 
         # Extracción
-        print("1️⃣  EXTRACCIÓN:")
+        print("1️⃣  EXTRACCIÓN DE NUEVOS:")
         print(f"   • Solicitudes nuevas:       {self.stats['solicitudes_nuevas']}")
         print(f"   • Documentos nuevos:        {self.stats['documentos_nuevos']}")
         print()
 
+        # Reproceso
+        print("2️⃣  REPROCESO DE FALLIDOS:")
+        print(f"   • Solicitudes reprocesadas: {self.stats['solicitudes_sin_docs_reprocesadas']}")
+        print(f"   • Documentos re-extraídos:  {self.stats['documentos_reextraidos']}")
+        print()
+
         # Descarga
-        print("2️⃣  DESCARGA:")
+        print("3️⃣  DESCARGA:")
         print(f"   • Documentos descargados:   {self.stats['documentos_descargados']}")
         print()
 
         # Parsing
-        print("3️⃣  PARSING:")
+        print("4️⃣  PARSING:")
         for tipo, count in self.stats['formularios_parseados'].items():
             print(f"   • {tipo:12s} parseados:  {count}")
         print()
@@ -304,16 +368,18 @@ class PipelineOrchestrator:
         logger.info("")
 
         try:
-            # Paso 1: Extracción de solicitudes
+            # Paso 1: Extracción de solicitudes + reproceso
             if not kwargs.get('skip_fetch'):
                 self.step_1_fetch_solicitudes()
                 self.step_2_fetch_documentos()
+                # NUEVO: Re-extraer documentos de solicitudes sin docs (reproceso)
+                self.step_2b_reextract_documentos_solicitudes_sin_docs()
 
-            # Paso 2: Descarga de documentos
+            # Paso 2: Descarga de documentos (ya incluye reproceso de pendientes)
             if not kwargs.get('skip_download'):
                 self.step_3_download_documents(limit=kwargs.get('limit'))
 
-            # Paso 3: Parsing de formularios
+            # Paso 3: Parsing de formularios (ya incluye reproceso de fallidos)
             if not kwargs.get('skip_parse'):
                 self.step_4_parse_formularios(
                     tipos=kwargs.get('tipos'),

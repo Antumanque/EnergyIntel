@@ -82,18 +82,13 @@ class ResumenEjecutivoParser:
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
 
-            # ESTRATEGIA: Buscar heading/bold que contenga "Resumen ejecutivo"
-            # y luego tomar el primer link después de ese elemento
-
-            # Buscar heading o bold que contenga "Resumen Ejecutivo"
+            # ESTRATEGIA 1: Buscar heading con "Resumen ejecutivo" + validar que el link también lo mencione
             resumen_element = soup.find(
                 ['h3', 'h4', 'h5', 'b', 'strong'],
                 string=re.compile(r'resumen\s+ejecutivo', re.IGNORECASE)
             )
 
             if resumen_element:
-                logger.info(f"Encontrado elemento 'Resumen Ejecutivo' para documento {id_documento}")
-
                 # Buscar el siguiente <a> después del elemento
                 next_link = resumen_element.find_next('a', href=True)
 
@@ -101,20 +96,28 @@ class ResumenEjecutivoParser:
                     href = next_link['href']
                     text = next_link.get_text(strip=True)
 
-                    # Verificar que sea un link a PDF o archivo
-                    if href.startswith('http') or href.endswith('.pdf'):
+                    # Verificar que sea un PDF y que el texto del link también mencione "resumen"
+                    if (href.startswith('http') or href.endswith('.pdf')):
                         pdf_filename = href.split('/')[-1] if '/' in href else None
 
-                        logger.info(f"Link a Resumen Ejecutivo encontrado para documento {id_documento}: {href}")
+                        # Validar que el texto del link o filename mencione "resumen"
+                        text_lower = text.lower()
+                        filename_lower = (pdf_filename or '').lower()
 
-                        return {
-                            "id_documento": id_documento,
-                            "pdf_url": href,
-                            "pdf_filename": pdf_filename,
-                            "texto_link": text,
-                        }
+                        if 'resumen' in text_lower or 'resumen' in filename_lower:
+                            match_criteria = f"heading_with_validation:{resumen_element.name}"
+                            logger.info(f"Link a Resumen Ejecutivo encontrado (con heading) para documento {id_documento}: {href}")
+
+                            return {
+                                "id_documento": id_documento,
+                                "pdf_url": href,
+                                "pdf_filename": pdf_filename,
+                                "texto_link": text,
+                                "match_criteria": match_criteria,
+                            }
+                        else:
+                            logger.warning(f"Link después de 'Resumen Ejecutivo' no contiene 'resumen' en texto/filename: {text} / {pdf_filename}")
                     else:
-                        # El siguiente link no es un PDF, seguir buscando
                         logger.warning(f"El siguiente link después de 'Resumen Ejecutivo' no es un PDF: {href}")
                 else:
                     logger.warning(f"No se encontró link después del elemento 'Resumen Ejecutivo'")
@@ -163,17 +166,18 @@ class ResumenEjecutivoParser:
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
 
-            # ESTRATEGIA 1: Buscar sección "Resumen ejecutivo" con heading (EIAs)
-            resumen_heading = soup.find(['h3', 'h4'], string=re.compile(
-                r'resumen ejecutivo', re.IGNORECASE
+            # ESTRATEGIA 1: Buscar sección "Resumen ejecutivo" con heading/bold
+            # El regex busca "resumen ejecutivo" en cualquier parte del texto (ej: "10 Resumen ejecutivo")
+            resumen_heading = soup.find(['h3', 'h4', 'b', 'strong'], string=re.compile(
+                r'resumen\s+ejecutivo', re.IGNORECASE
             ))
 
             if resumen_heading:
-                # Buscar el siguiente <ul> con el link
-                next_sibling = resumen_heading.find_next_sibling()
+                # Buscar el siguiente <ul> con el link (puede haber <br> en el medio)
+                next_ul = resumen_heading.find_next('ul')
 
-                if next_sibling and next_sibling.name == 'ul':
-                    links = next_sibling.find_all('a', href=True)
+                if next_ul:
+                    links = next_ul.find_all('a', href=True)
 
                     for link in links:
                         href = link['href']
@@ -183,6 +187,7 @@ class ResumenEjecutivoParser:
                         # No verificamos el texto porque puede ser abreviado (ej: "RESUMEN EJ.")
                         if href.endswith('.pdf') or 'archivos' in href.lower():
                             pdf_filename = href.split('/')[-1] if '/' in href else None
+                            match_criteria = f"heading_with_ul:{resumen_heading.name}"
 
                             logger.info(f"Link a Resumen Ejecutivo encontrado (con heading) para documento {id_documento}: {href}")
 
@@ -191,26 +196,14 @@ class ResumenEjecutivoParser:
                                 "pdf_url": href,
                                 "pdf_filename": pdf_filename,
                                 "texto_link": text,
+                                "match_criteria": match_criteria,
                             }
 
-                    # Hay heading pero ningún link PDF
-                    return {
-                        "id_documento": id_documento,
-                        "failure_reason": f"Heading 'Resumen Ejecutivo' encontrado pero no hay links a PDF en <ul>. Links en <ul>: {len(links)}",
-                        "debug_snippet": self._extract_debug_snippet(soup),
-                    }
-                else:
-                    # Hay heading pero no hay <ul> siguiente
-                    return {
-                        "id_documento": id_documento,
-                        "failure_reason": f"Heading 'Resumen Ejecutivo' encontrado pero no hay <ul> siguiente. Next sibling: {next_sibling.name if next_sibling else 'None'}",
-                        "debug_snippet": self._extract_debug_snippet(soup),
-                    }
+                # No hay <ul> o no tiene links PDF → continuar con ESTRATEGIA 2
+                # (documentos legacy pueden no tener <ul>)
 
             # ESTRATEGIA 2: Buscar directamente en TODOS los links
-            # Buscar patrones de:
-            # - EIAs: "Resumen Ejecutivo", "Capítulo 00", "Capítulo 20", "Cap 00", "Cap 20"
-            # - DIAs: "Ficha Resumen", "Resumen"
+            # Buscar patrones de "Resumen Ejecutivo", "Capítulo 00", "Capítulo 20", "Cap 00", "Cap 20"
             all_links = soup.find_all('a', href=True)
 
             for link in all_links:
@@ -222,7 +215,7 @@ class ResumenEjecutivoParser:
                 if not (href.endswith('.pdf') or 'archivos' in href.lower()):
                     continue
 
-                # Buscar patrones de EIA
+                # Buscar patrones de Resumen Ejecutivo
                 if ('resumen ejecutivo' in text_lower or
                     'capítulo 00' in text_lower or
                     'capitulo 00' in text_lower or
@@ -237,23 +230,7 @@ class ResumenEjecutivoParser:
 
                     pdf_filename = href.split('/')[-1] if '/' in href else None
 
-                    logger.info(f"Link a Resumen Ejecutivo (EIA) encontrado para documento {id_documento}: {href}")
-
-                    return {
-                        "id_documento": id_documento,
-                        "pdf_url": href,
-                        "pdf_filename": pdf_filename,
-                        "texto_link": text,
-                    }
-
-                # Buscar patrones de DIA (Ficha Resumen)
-                if ('ficha resumen' in text_lower or
-                    'ficha_resumen' in text_lower or
-                    (('ficha' in text_lower or 'cap' in text_lower or 'capitulo' in text_lower) and 'resumen' in text_lower)):
-
-                    pdf_filename = href.split('/')[-1] if '/' in href else None
-
-                    logger.info(f"Link a Ficha Resumen (DIA) encontrado para documento {id_documento}: {href}")
+                    logger.info(f"Link a Resumen Ejecutivo encontrado para documento {id_documento}: {href}")
 
                     return {
                         "id_documento": id_documento,
