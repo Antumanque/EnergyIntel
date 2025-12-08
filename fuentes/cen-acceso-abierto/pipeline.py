@@ -64,10 +64,18 @@ class PipelineOrchestrator:
 
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
+        self.pipeline_run_id = None
+        self.db_manager = None
         self.stats = {
-            # Extracción de nuevos
+            # Solicitudes
+            "solicitudes_en_api": 0,
             "solicitudes_nuevas": 0,
+            "solicitudes_actualizadas": 0,
+            "solicitudes_sin_cambios": 0,
+
+            # Documentos
             "documentos_nuevos": 0,
+            "documentos_actualizados": 0,
 
             # Reproceso
             "solicitudes_sin_docs_reprocesadas": 0,
@@ -81,6 +89,42 @@ class PipelineOrchestrator:
                 "FEHACIENTE": 0
             }
         }
+
+    def _init_db_manager(self):
+        """Inicializa el gestor de base de datos."""
+        if self.db_manager is None:
+            from src.repositories.cen import get_cen_db_manager
+            self.db_manager = get_cen_db_manager()
+
+    def _start_pipeline_run(self):
+        """Inicia un nuevo pipeline_run en la BD."""
+        if self.dry_run:
+            return
+
+        self._init_db_manager()
+        self.pipeline_run_id = self.db_manager.create_pipeline_run()
+
+    def _finish_pipeline_run(self, status: str, error_message: str = None, duration_seconds: int = None):
+        """Finaliza el pipeline_run con estadísticas."""
+        if self.dry_run or not self.pipeline_run_id:
+            return
+
+        self.db_manager.update_pipeline_run(
+            run_id=self.pipeline_run_id,
+            status=status,
+            solicitudes_en_api=self.stats["solicitudes_en_api"],
+            solicitudes_nuevas=self.stats["solicitudes_nuevas"],
+            solicitudes_actualizadas=self.stats["solicitudes_actualizadas"],
+            solicitudes_sin_cambios=self.stats["solicitudes_sin_cambios"],
+            documentos_nuevos=self.stats["documentos_nuevos"],
+            documentos_actualizados=self.stats["documentos_actualizados"],
+            documentos_descargados=self.stats["documentos_descargados"],
+            formularios_parseados_sac=self.stats["formularios_parseados"]["SAC"],
+            formularios_parseados_suctd=self.stats["formularios_parseados"]["SUCTD"],
+            formularios_parseados_fehaciente=self.stats["formularios_parseados"]["FEHACIENTE"],
+            error_message=error_message,
+            duration_seconds=duration_seconds
+        )
 
     def print_header(self, text: str):
         """Imprime header visual."""
@@ -98,64 +142,100 @@ class PipelineOrchestrator:
     # PASO 1: EXTRACCIÓN DE SOLICITUDES Y DOCUMENTOS
     # =========================================================================
 
-    def step_1_fetch_solicitudes(self) -> int:
+    def step_1_fetch_solicitudes(self) -> Dict[str, int]:
         """
-        Extrae solicitudes de la API del CEN (incremental).
+        Extrae solicitudes de la API del CEN.
+
+        Nota: La API del CEN ignora el parámetro 'anio' y siempre devuelve
+        TODAS las solicitudes. Por eso hacemos una sola llamada.
 
         Returns:
-            Número de solicitudes nuevas extraídas
+            Dict con conteos: {"nuevas": N, "actualizadas": N, "sin_cambios": N}
         """
         self.print_section("PASO 1: Extracción de Solicitudes")
 
         if self.dry_run:
             logger.info("🔍 [DRY RUN] Se extraerían solicitudes de la API...")
-            return 0
+            return {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
 
         try:
             from src.extractors.solicitudes import get_solicitudes_extractor
-            from src.settings import get_settings
 
-            settings = get_settings()
             extractor = get_solicitudes_extractor()
 
-            # Extraer solicitudes por año
-            total_nuevas = 0
-            for year in settings.cen_years_list:
-                logger.info(f"📅 Procesando año {year}...")
-                nuevas = extractor.extract_solicitudes_by_year(year)
-                total_nuevas += nuevas
-                logger.info(f"  ✅ {nuevas} solicitudes nuevas de {year}")
+            # La API ignora el parámetro año y devuelve TODAS las solicitudes
+            logger.info("📡 Extrayendo todas las solicitudes de la API...")
+            success, all_solicitudes = extractor.fetch_solicitudes_by_year(2020)
 
-            logger.info(f"\n✅ Total solicitudes nuevas: {total_nuevas}")
-            self.stats["solicitudes_nuevas"] = total_nuevas
-            return total_nuevas
+            if not success:
+                logger.error("❌ Error al extraer solicitudes de la API")
+                return {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
+
+            self.stats["solicitudes_en_api"] = len(all_solicitudes)
+            logger.info(f"📊 Total solicitudes en la API: {len(all_solicitudes)}")
+
+            # UPSERT inteligente (detecta cambios reales)
+            if all_solicitudes:
+                result = extractor.db_manager.insert_solicitudes_bulk(
+                    all_solicitudes,
+                    pipeline_run_id=self.pipeline_run_id
+                )
+                self.stats["solicitudes_nuevas"] = result["nuevas"]
+                self.stats["solicitudes_actualizadas"] = result["actualizadas"]
+                self.stats["solicitudes_sin_cambios"] = result["sin_cambios"]
+                return result
+            else:
+                logger.info("\n✅ No hay solicitudes para procesar")
+                return {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
 
         except Exception as e:
             logger.error(f"❌ Error en extracción de solicitudes: {e}", exc_info=True)
             raise
 
-    def step_2_fetch_documentos(self) -> int:
+    def step_2_fetch_documentos(self) -> Dict[str, int]:
         """
-        Extrae documentos de cada solicitud (incremental).
+        Extrae documentos de cada solicitud.
 
         Returns:
-            Número de documentos nuevos extraídos
+            Dict con conteos: {"nuevos": N, "actualizados": N, "sin_cambios": N}
         """
         self.print_section("PASO 2: Extracción de Documentos")
 
         if self.dry_run:
             logger.info("🔍 [DRY RUN] Se extraerían documentos de solicitudes...")
-            return 0
+            return {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
 
         try:
-            from src.extractors.solicitudes import get_solicitudes_extractor
+            from src.extractors.solicitudes import get_solicitudes_extractor, flatten_documentos
+            from src.repositories.cen import get_cen_db_manager
 
             extractor = get_solicitudes_extractor()
-            total_nuevos = extractor.extract_documentos_all_solicitudes()
+            db_manager = get_cen_db_manager()
 
-            logger.info(f"\n✅ Total documentos nuevos: {total_nuevos}")
-            self.stats["documentos_nuevos"] = total_nuevos
-            return total_nuevos
+            # Obtener todas las solicitudes de la BD
+            solicitud_ids = list(db_manager.get_existing_solicitud_ids())
+            logger.info(f"📋 Total solicitudes en BD: {len(solicitud_ids)}")
+
+            if not solicitud_ids:
+                logger.info("✅ No hay solicitudes para procesar")
+                return {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+
+            # Extraer documentos de todas las solicitudes
+            result = extractor.extract_documentos_for_solicitudes(solicitud_ids)
+
+            # UPSERT inteligente de documentos
+            all_documentos = flatten_documentos(result["documentos_by_solicitud"])
+            if all_documentos:
+                doc_result = db_manager.insert_documentos_bulk(
+                    all_documentos,
+                    pipeline_run_id=self.pipeline_run_id
+                )
+                self.stats["documentos_nuevos"] = doc_result["nuevos"]
+                self.stats["documentos_actualizados"] = doc_result["actualizados"]
+                return doc_result
+            else:
+                logger.info("\n✅ No hay documentos nuevos para insertar")
+                return {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
 
         except Exception as e:
             logger.error(f"❌ Error en extracción de documentos: {e}", exc_info=True)
@@ -329,27 +409,37 @@ class PipelineOrchestrator:
         """Imprime reporte final consolidado."""
         self.print_header("📊 REPORTE FINAL DEL PIPELINE")
 
+        if self.pipeline_run_id:
+            print(f"🆔 Pipeline Run ID: #{self.pipeline_run_id}")
         print(f"⏱️  Tiempo total: {elapsed_seconds:.1f} segundos ({elapsed_seconds/60:.1f} minutos)\n")
 
-        # Extracción
-        print("1️⃣  EXTRACCIÓN DE NUEVOS:")
-        print(f"   • Solicitudes nuevas:       {self.stats['solicitudes_nuevas']}")
-        print(f"   • Documentos nuevos:        {self.stats['documentos_nuevos']}")
+        # Solicitudes
+        print("1️⃣  SOLICITUDES:")
+        print(f"   • En API:        {self.stats['solicitudes_en_api']}")
+        print(f"   • Nuevas:        {self.stats['solicitudes_nuevas']}")
+        print(f"   • Actualizadas:  {self.stats['solicitudes_actualizadas']}")
+        print(f"   • Sin cambios:   {self.stats['solicitudes_sin_cambios']}")
+        print()
+
+        # Documentos
+        print("2️⃣  DOCUMENTOS:")
+        print(f"   • Nuevos:        {self.stats['documentos_nuevos']}")
+        print(f"   • Actualizados:  {self.stats['documentos_actualizados']}")
         print()
 
         # Reproceso
-        print("2️⃣  REPROCESO DE FALLIDOS:")
+        print("3️⃣  REPROCESO DE FALLIDOS:")
         print(f"   • Solicitudes reprocesadas: {self.stats['solicitudes_sin_docs_reprocesadas']}")
         print(f"   • Documentos re-extraídos:  {self.stats['documentos_reextraidos']}")
         print()
 
         # Descarga
-        print("3️⃣  DESCARGA:")
+        print("4️⃣  DESCARGA:")
         print(f"   • Documentos descargados:   {self.stats['documentos_descargados']}")
         print()
 
         # Parsing
-        print("4️⃣  PARSING:")
+        print("5️⃣  PARSING:")
         for tipo, count in self.stats['formularios_parseados'].items():
             print(f"   • {tipo:12s} parseados:  {count}")
         print()
@@ -366,6 +456,9 @@ class PipelineOrchestrator:
         logger.info(f"📅 Fecha: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"🔧 Modo: {'DRY RUN' if self.dry_run else 'EJECUCIÓN REAL'}")
         logger.info("")
+
+        # Iniciar tracking del pipeline run
+        self._start_pipeline_run()
 
         try:
             # Paso 1: Extracción de solicitudes + reproceso
@@ -390,13 +483,31 @@ class PipelineOrchestrator:
             elapsed = (datetime.now() - start_time).total_seconds()
             self.print_final_report(elapsed)
 
+            # Finalizar tracking exitoso
+            self._finish_pipeline_run(
+                status='completed',
+                duration_seconds=int(elapsed)
+            )
+
             return 0  # Éxito
 
         except KeyboardInterrupt:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            self._finish_pipeline_run(
+                status='failed',
+                error_message='Interrumpido por el usuario',
+                duration_seconds=int(elapsed)
+            )
             logger.warning("\n⚠️  Pipeline interrumpido por el usuario")
             return 130
 
         except Exception as e:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            self._finish_pipeline_run(
+                status='failed',
+                error_message=str(e)[:500],
+                duration_seconds=int(elapsed)
+            )
             logger.error(f"\n❌ Error fatal en pipeline: {e}", exc_info=True)
             return 1
 

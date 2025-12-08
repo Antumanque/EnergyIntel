@@ -125,9 +125,9 @@ class Settings(BaseSettings):
             offset: Offset de paginación (página)
 
         Returns:
-            Diccionario con todos los parámetros de la API
+            Diccionario con todos los parámetros de la API (sin valores vacíos)
         """
-        return {
+        params = {
             "nombre": self.sea_nombre,
             "titular": self.sea_titular,
             "folio": self.sea_folio,
@@ -144,9 +144,14 @@ class Settings(BaseSettings):
             "id_tipoexpediente": self.sea_id_tipo_expediente,
             "offset": offset,
             "limit": self.sea_limit,
-            "orderColumn": self.sea_order_column,
-            "orderDir": self.sea_order_dir,
         }
+        # Solo agregar orderColumn/orderDir si tienen valor
+        # (vacíos causan bug de duplicados en paginación)
+        if self.sea_order_column:
+            params["orderColumn"] = self.sea_order_column
+        if self.sea_order_dir:
+            params["orderDir"] = self.sea_order_dir
+        return params
 
 
 # Singleton instance

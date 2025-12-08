@@ -132,77 +132,184 @@ class CENDatabaseManager:
             logger.error(f"Error al obtener IDs de solicitudes existentes: {e}")
             return set()
 
-    def insert_solicitudes_bulk(self, solicitudes: List[Dict[str, Any]]) -> int:
+    def insert_solicitudes_bulk(
+        self,
+        solicitudes: List[Dict[str, Any]],
+        pipeline_run_id: Optional[int] = None
+    ) -> Dict[str, int]:
         """
-        Inserta múltiples solicitudes en la base de datos (solo las nuevas).
+        Inserta o actualiza solicitudes con detección de cambios reales.
 
-        Implementa estrategia append-only: solo inserta registros nuevos,
-        nunca actualiza ni elimina registros existentes.
+        Estrategia inteligente:
+        - Si el registro no existe → INSERT (nuevo)
+        - Si existe y algún campo cambió → UPDATE (actualizado)
+        - Si existe y nada cambió → no hace nada (sin cambios)
+
+        Solo actualiza updated_at cuando hay cambios reales.
 
         Args:
             solicitudes: Lista de diccionarios con datos de solicitudes
+            pipeline_run_id: ID del pipeline_run actual (opcional)
 
         Returns:
-            Número de solicitudes insertadas
+            Dict con conteos: {"nuevas": N, "actualizadas": N, "sin_cambios": N}
         """
+        result = {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
+
         if not solicitudes:
             logger.info("No hay solicitudes para insertar")
-            return 0
+            return result
 
-        # Obtener IDs existentes
-        existing_ids = self.get_existing_solicitud_ids()
-
-        # Filtrar solo las solicitudes NUEVAS
-        new_solicitudes = [s for s in solicitudes if s.get("id") not in existing_ids]
-
-        if not new_solicitudes:
-            logger.info(f"✅ Todas las {len(solicitudes)} solicitudes ya existen (skipped)")
-            return 0
-
-        logger.info(
-            f"📥 Insertando {len(new_solicitudes)} solicitudes nuevas "
-            f"(skipped {len(solicitudes) - len(new_solicitudes)} duplicadas)"
-        )
+        logger.info(f"📥 Procesando {len(solicitudes)} solicitudes (UPSERT inteligente)...")
 
         # Normalizar fechas ISO a formato MySQL
-        for solicitud in new_solicitudes:
+        for solicitud in solicitudes:
             solicitud['create_date'] = parse_iso_datetime(solicitud.get('create_date'))
             solicitud['update_date'] = parse_iso_datetime(solicitud.get('update_date'))
             solicitud['deleted_at'] = parse_iso_datetime(solicitud.get('deleted_at'))
             solicitud['cancelled_at'] = parse_iso_datetime(solicitud.get('cancelled_at'))
             solicitud['fecha_estimada_conexion'] = parse_iso_date(solicitud.get('fecha_estimada_conexion'))
 
-        # SQL de inserción
-        insert_sql = """
-        INSERT INTO solicitudes (
-            id, tipo_solicitud_id, tipo_solicitud, estado_solicitud_id, estado_solicitud,
-            create_date, update_date, proyecto_id, proyecto, rut_empresa, razon_social,
-            tipo_tecnologia_nombre, potencia_nominal,
-            comuna_id, comuna, provincia_id, provincia, region_id, region, lat, lng,
-            nombre_se, nivel_tension, seccion_barra_conexion, pano_conexion, fecha_estimada_conexion,
-            calificacion_id, calificacion_nombre, etapa_id, etapa, nup, cup,
-            deleted_at, cancelled_at, fetched_at
-        ) VALUES (
-            %(id)s, %(tipo_solicitud_id)s, %(tipo_solicitud)s, %(estado_solicitud_id)s, %(estado_solicitud)s,
-            %(create_date)s, %(update_date)s, %(proyecto_id)s, %(proyecto)s, %(rut_empresa)s, %(razon_social)s,
-            %(tipo_tecnologia_nombre)s, %(potencia_nominal)s,
-            %(comuna_id)s, %(comuna)s, %(provincia_id)s, %(provincia)s, %(region_id)s, %(region)s, %(lat)s, %(lng)s,
-            %(nombre_se)s, %(nivel_tension)s, %(seccion_barra_conexion)s, %(pano_conexion)s, %(fecha_estimada_conexion)s,
-            %(calificacion_id)s, %(calificacion_nombre)s, %(etapa_id)s, %(etapa)s, %(nup)s, %(cup)s,
-            %(deleted_at)s, %(cancelled_at)s, NOW()
-        )
-        """
-
         try:
             with self.connection() as conn:
-                cursor = conn.cursor()
-                cursor.executemany(insert_sql, new_solicitudes)
+                cursor = conn.cursor(dictionary=True)
+
+                # Obtener solicitudes existentes con sus valores actuales
+                existing_ids = {s['id'] for s in solicitudes}
+                if existing_ids:
+                    format_strings = ','.join(['%s'] * len(existing_ids))
+                    cursor.execute(
+                        f"SELECT * FROM solicitudes WHERE id IN ({format_strings})",
+                        tuple(existing_ids)
+                    )
+                    existing = {row['id']: row for row in cursor.fetchall()}
+                else:
+                    existing = {}
+
+                # Campos a comparar para detectar cambios
+                compare_fields = [
+                    'tipo_solicitud_id', 'tipo_solicitud', 'estado_solicitud_id', 'estado_solicitud',
+                    'update_date', 'proyecto_id', 'proyecto', 'rut_empresa', 'razon_social',
+                    'tipo_tecnologia_nombre', 'potencia_nominal', 'comuna_id', 'comuna',
+                    'provincia_id', 'provincia', 'region_id', 'region', 'lat', 'lng',
+                    'nombre_se', 'nivel_tension', 'seccion_barra_conexion', 'pano_conexion',
+                    'fecha_estimada_conexion', 'calificacion_id', 'calificacion_nombre',
+                    'etapa_id', 'etapa', 'nup', 'cup', 'deleted_at', 'cancelled_at'
+                ]
+
+                nuevas = []
+                actualizadas = []
+
+                for sol in solicitudes:
+                    sol_id = sol['id']
+
+                    if sol_id not in existing:
+                        # Nueva solicitud
+                        nuevas.append(sol)
+                    else:
+                        # Verificar si hay cambios reales
+                        old = existing[sol_id]
+                        has_changes = False
+
+                        for field in compare_fields:
+                            old_val = old.get(field)
+                            new_val = sol.get(field)
+
+                            # Normalizar para comparación
+                            if old_val is not None and hasattr(old_val, 'strftime'):
+                                old_val = old_val.strftime('%Y-%m-%d %H:%M:%S') if hasattr(old_val, 'hour') else old_val.strftime('%Y-%m-%d')
+
+                            if str(old_val) != str(new_val):
+                                has_changes = True
+                                break
+
+                        if has_changes:
+                            actualizadas.append(sol)
+                        else:
+                            result["sin_cambios"] += 1
+
+                # INSERT nuevas
+                if nuevas:
+                    insert_sql = """
+                    INSERT INTO solicitudes (
+                        id, tipo_solicitud_id, tipo_solicitud, estado_solicitud_id, estado_solicitud,
+                        create_date, update_date, proyecto_id, proyecto, rut_empresa, razon_social,
+                        tipo_tecnologia_nombre, potencia_nominal,
+                        comuna_id, comuna, provincia_id, provincia, region_id, region, lat, lng,
+                        nombre_se, nivel_tension, seccion_barra_conexion, pano_conexion, fecha_estimada_conexion,
+                        calificacion_id, calificacion_nombre, etapa_id, etapa, nup, cup,
+                        deleted_at, cancelled_at, fetched_at, last_pipeline_run_id
+                    ) VALUES (
+                        %(id)s, %(tipo_solicitud_id)s, %(tipo_solicitud)s, %(estado_solicitud_id)s, %(estado_solicitud)s,
+                        %(create_date)s, %(update_date)s, %(proyecto_id)s, %(proyecto)s, %(rut_empresa)s, %(razon_social)s,
+                        %(tipo_tecnologia_nombre)s, %(potencia_nominal)s,
+                        %(comuna_id)s, %(comuna)s, %(provincia_id)s, %(provincia)s, %(region_id)s, %(region)s, %(lat)s, %(lng)s,
+                        %(nombre_se)s, %(nivel_tension)s, %(seccion_barra_conexion)s, %(pano_conexion)s, %(fecha_estimada_conexion)s,
+                        %(calificacion_id)s, %(calificacion_nombre)s, %(etapa_id)s, %(etapa)s, %(nup)s, %(cup)s,
+                        %(deleted_at)s, %(cancelled_at)s, NOW(), %(pipeline_run_id)s
+                    )
+                    """
+                    for sol in nuevas:
+                        sol['pipeline_run_id'] = pipeline_run_id
+                    cursor.executemany(insert_sql, nuevas)
+                    result["nuevas"] = len(nuevas)
+
+                # UPDATE actualizadas (solo las que tienen cambios reales)
+                if actualizadas:
+                    update_sql = """
+                    UPDATE solicitudes SET
+                        tipo_solicitud_id = %(tipo_solicitud_id)s,
+                        tipo_solicitud = %(tipo_solicitud)s,
+                        estado_solicitud_id = %(estado_solicitud_id)s,
+                        estado_solicitud = %(estado_solicitud)s,
+                        update_date = %(update_date)s,
+                        proyecto_id = %(proyecto_id)s,
+                        proyecto = %(proyecto)s,
+                        rut_empresa = %(rut_empresa)s,
+                        razon_social = %(razon_social)s,
+                        tipo_tecnologia_nombre = %(tipo_tecnologia_nombre)s,
+                        potencia_nominal = %(potencia_nominal)s,
+                        comuna_id = %(comuna_id)s,
+                        comuna = %(comuna)s,
+                        provincia_id = %(provincia_id)s,
+                        provincia = %(provincia)s,
+                        region_id = %(region_id)s,
+                        region = %(region)s,
+                        lat = %(lat)s,
+                        lng = %(lng)s,
+                        nombre_se = %(nombre_se)s,
+                        nivel_tension = %(nivel_tension)s,
+                        seccion_barra_conexion = %(seccion_barra_conexion)s,
+                        pano_conexion = %(pano_conexion)s,
+                        fecha_estimada_conexion = %(fecha_estimada_conexion)s,
+                        calificacion_id = %(calificacion_id)s,
+                        calificacion_nombre = %(calificacion_nombre)s,
+                        etapa_id = %(etapa_id)s,
+                        etapa = %(etapa)s,
+                        nup = %(nup)s,
+                        cup = %(cup)s,
+                        deleted_at = %(deleted_at)s,
+                        cancelled_at = %(cancelled_at)s,
+                        updated_at = NOW(),
+                        last_pipeline_run_id = %(pipeline_run_id)s
+                    WHERE id = %(id)s
+                    """
+                    for sol in actualizadas:
+                        sol['pipeline_run_id'] = pipeline_run_id
+                    cursor.executemany(update_sql, actualizadas)
+                    result["actualizadas"] = len(actualizadas)
+
                 conn.commit()
-                inserted_count = cursor.rowcount
-                logger.info(f"✅ {inserted_count} solicitudes insertadas exitosamente")
-                return inserted_count
+
+                logger.info(
+                    f"✅ Solicitudes: {result['nuevas']} nuevas, "
+                    f"{result['actualizadas']} actualizadas, "
+                    f"{result['sin_cambios']} sin cambios"
+                )
+                return result
+
         except Error as e:
-            logger.error(f"❌ Error al insertar solicitudes: {e}", exc_info=True)
+            logger.error(f"❌ Error en UPSERT de solicitudes: {e}", exc_info=True)
             raise
 
     def get_existing_documento_ids(self) -> set[int]:
@@ -223,68 +330,151 @@ class CENDatabaseManager:
             logger.error(f"Error al obtener IDs de documentos existentes: {e}")
             return set()
 
-    def insert_documentos_bulk(self, documentos: List[Dict[str, Any]]) -> int:
+    def insert_documentos_bulk(
+        self,
+        documentos: List[Dict[str, Any]],
+        pipeline_run_id: Optional[int] = None
+    ) -> Dict[str, int]:
         """
-        Inserta múltiples documentos en la base de datos (solo los nuevos).
+        Inserta o actualiza documentos con detección de cambios reales.
 
-        Implementa estrategia append-only: solo inserta registros nuevos,
-        nunca actualiza ni elimina registros existentes.
+        Estrategia inteligente:
+        - Si el registro no existe → INSERT (nuevo)
+        - Si existe y algún campo cambió → UPDATE (actualizado)
+        - Si existe y nada cambió → no hace nada (sin cambios)
+
+        Nota: NO actualiza campos de descarga local (downloaded, local_path, etc.)
 
         Args:
             documentos: Lista de diccionarios con datos de documentos
+            pipeline_run_id: ID del pipeline_run actual (opcional)
 
         Returns:
-            Número de documentos insertados
+            Dict con conteos: {"nuevos": N, "actualizados": N, "sin_cambios": N}
         """
+        result = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+
         if not documentos:
             logger.info("No hay documentos para insertar")
-            return 0
+            return result
 
-        # Obtener IDs existentes
-        existing_ids = self.get_existing_documento_ids()
-
-        # Filtrar solo los documentos NUEVOS
-        new_documentos = [d for d in documentos if d.get("id") not in existing_ids]
-
-        if not new_documentos:
-            logger.info(f"✅ Todos los {len(documentos)} documentos ya existen (skipped)")
-            return 0
-
-        logger.info(
-            f"📥 Insertando {len(new_documentos)} documentos nuevos "
-            f"(skipped {len(documentos) - len(new_documentos)} duplicados)"
-        )
+        logger.info(f"📥 Procesando {len(documentos)} documentos (UPSERT inteligente)...")
 
         # Normalizar fechas ISO a formato MySQL
-        for documento in new_documentos:
+        for documento in documentos:
             documento['create_date'] = parse_iso_datetime(documento.get('create_date'))
             documento['update_date'] = parse_iso_datetime(documento.get('update_date'))
 
-        # SQL de inserción
-        insert_sql = """
-        INSERT INTO documentos (
-            id, solicitud_id, nombre, ruta_s3, tipo_documento_id, tipo_documento,
-            empresa_id, razon_social, create_date, update_date,
-            estado_solicitud_id, etapa_id, etapa, version_id, visible, deleted,
-            fetched_at
-        ) VALUES (
-            %(id)s, %(solicitud_id)s, %(nombre)s, %(ruta_s3)s, %(tipo_documento_id)s, %(tipo_documento)s,
-            %(empresa_id)s, %(razon_social)s, %(create_date)s, %(update_date)s,
-            %(estado_solicitud_id)s, %(etapa_id)s, %(etapa)s, %(version_id)s, %(visible)s, %(deleted)s,
-            NOW()
-        )
-        """
-
         try:
             with self.connection() as conn:
-                cursor = conn.cursor()
-                cursor.executemany(insert_sql, new_documentos)
+                cursor = conn.cursor(dictionary=True)
+
+                # Obtener documentos existentes
+                existing_ids = {d['id'] for d in documentos}
+                if existing_ids:
+                    format_strings = ','.join(['%s'] * len(existing_ids))
+                    cursor.execute(
+                        f"SELECT * FROM documentos WHERE id IN ({format_strings})",
+                        tuple(existing_ids)
+                    )
+                    existing = {row['id']: row for row in cursor.fetchall()}
+                else:
+                    existing = {}
+
+                # Campos a comparar (excluyendo campos de descarga local)
+                compare_fields = [
+                    'solicitud_id', 'nombre', 'ruta_s3', 'tipo_documento_id', 'tipo_documento',
+                    'empresa_id', 'razon_social', 'update_date', 'estado_solicitud_id',
+                    'etapa_id', 'etapa', 'version_id', 'visible', 'deleted'
+                ]
+
+                nuevos = []
+                actualizados = []
+
+                for doc in documentos:
+                    doc_id = doc['id']
+
+                    if doc_id not in existing:
+                        nuevos.append(doc)
+                    else:
+                        # Verificar cambios reales
+                        old = existing[doc_id]
+                        has_changes = False
+
+                        for field in compare_fields:
+                            old_val = old.get(field)
+                            new_val = doc.get(field)
+
+                            if old_val is not None and hasattr(old_val, 'strftime'):
+                                old_val = old_val.strftime('%Y-%m-%d %H:%M:%S')
+
+                            if str(old_val) != str(new_val):
+                                has_changes = True
+                                break
+
+                        if has_changes:
+                            actualizados.append(doc)
+                        else:
+                            result["sin_cambios"] += 1
+
+                # INSERT nuevos
+                if nuevos:
+                    insert_sql = """
+                    INSERT INTO documentos (
+                        id, solicitud_id, nombre, ruta_s3, tipo_documento_id, tipo_documento,
+                        empresa_id, razon_social, create_date, update_date,
+                        estado_solicitud_id, etapa_id, etapa, version_id, visible, deleted,
+                        fetched_at, last_pipeline_run_id
+                    ) VALUES (
+                        %(id)s, %(solicitud_id)s, %(nombre)s, %(ruta_s3)s, %(tipo_documento_id)s, %(tipo_documento)s,
+                        %(empresa_id)s, %(razon_social)s, %(create_date)s, %(update_date)s,
+                        %(estado_solicitud_id)s, %(etapa_id)s, %(etapa)s, %(version_id)s, %(visible)s, %(deleted)s,
+                        NOW(), %(pipeline_run_id)s
+                    )
+                    """
+                    for doc in nuevos:
+                        doc['pipeline_run_id'] = pipeline_run_id
+                    cursor.executemany(insert_sql, nuevos)
+                    result["nuevos"] = len(nuevos)
+
+                # UPDATE actualizados
+                if actualizados:
+                    update_sql = """
+                    UPDATE documentos SET
+                        solicitud_id = %(solicitud_id)s,
+                        nombre = %(nombre)s,
+                        ruta_s3 = %(ruta_s3)s,
+                        tipo_documento_id = %(tipo_documento_id)s,
+                        tipo_documento = %(tipo_documento)s,
+                        empresa_id = %(empresa_id)s,
+                        razon_social = %(razon_social)s,
+                        update_date = %(update_date)s,
+                        estado_solicitud_id = %(estado_solicitud_id)s,
+                        etapa_id = %(etapa_id)s,
+                        etapa = %(etapa)s,
+                        version_id = %(version_id)s,
+                        visible = %(visible)s,
+                        deleted = %(deleted)s,
+                        updated_at = NOW(),
+                        last_pipeline_run_id = %(pipeline_run_id)s
+                    WHERE id = %(id)s
+                    """
+                    for doc in actualizados:
+                        doc['pipeline_run_id'] = pipeline_run_id
+                    cursor.executemany(update_sql, actualizados)
+                    result["actualizados"] = len(actualizados)
+
                 conn.commit()
-                inserted_count = cursor.rowcount
-                logger.info(f"✅ {inserted_count} documentos insertados exitosamente")
-                return inserted_count
+
+                logger.info(
+                    f"✅ Documentos: {result['nuevos']} nuevos, "
+                    f"{result['actualizados']} actualizados, "
+                    f"{result['sin_cambios']} sin cambios"
+                )
+                return result
+
         except Error as e:
-            logger.error(f"❌ Error al insertar documentos: {e}", exc_info=True)
+            logger.error(f"❌ Error en UPSERT de documentos: {e}", exc_info=True)
             raise
 
     def get_solicitudes_sin_documentos(self) -> List[int]:
@@ -308,6 +498,151 @@ class CENDatabaseManager:
                 return solicitud_ids
         except Error as e:
             logger.error(f"Error al obtener solicitudes sin documentos: {e}")
+            return []
+
+    # =========================================================================
+    # PIPELINE RUNS - Tracking de ejecuciones
+    # =========================================================================
+
+    def create_pipeline_run(self) -> int:
+        """
+        Crea un nuevo registro de pipeline_run.
+
+        Returns:
+            ID del nuevo pipeline_run
+        """
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO pipeline_runs (started_at, status)
+                    VALUES (NOW(), 'running')
+                """)
+                conn.commit()
+                run_id = cursor.lastrowid
+                logger.info(f"📝 Pipeline run #{run_id} iniciado")
+                return run_id
+        except Error as e:
+            logger.error(f"Error al crear pipeline_run: {e}")
+            return 0
+
+    def update_pipeline_run(
+        self,
+        run_id: int,
+        status: str = None,
+        solicitudes_en_api: int = None,
+        solicitudes_nuevas: int = None,
+        solicitudes_actualizadas: int = None,
+        solicitudes_sin_cambios: int = None,
+        documentos_nuevos: int = None,
+        documentos_actualizados: int = None,
+        documentos_descargados: int = None,
+        formularios_parseados_sac: int = None,
+        formularios_parseados_suctd: int = None,
+        formularios_parseados_fehaciente: int = None,
+        error_message: str = None,
+        duration_seconds: int = None
+    ) -> None:
+        """
+        Actualiza un pipeline_run con estadísticas.
+
+        Args:
+            run_id: ID del pipeline_run
+            status: Estado ('running', 'completed', 'failed')
+            ... otros campos de estadísticas
+        """
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor()
+
+                # Construir UPDATE dinámico solo con campos no-None
+                updates = []
+                params = []
+
+                if status is not None:
+                    updates.append("status = %s")
+                    params.append(status)
+                    if status in ('completed', 'failed'):
+                        updates.append("finished_at = NOW()")
+
+                if solicitudes_en_api is not None:
+                    updates.append("solicitudes_en_api = %s")
+                    params.append(solicitudes_en_api)
+
+                if solicitudes_nuevas is not None:
+                    updates.append("solicitudes_nuevas = %s")
+                    params.append(solicitudes_nuevas)
+
+                if solicitudes_actualizadas is not None:
+                    updates.append("solicitudes_actualizadas = %s")
+                    params.append(solicitudes_actualizadas)
+
+                if solicitudes_sin_cambios is not None:
+                    updates.append("solicitudes_sin_cambios = %s")
+                    params.append(solicitudes_sin_cambios)
+
+                if documentos_nuevos is not None:
+                    updates.append("documentos_nuevos = %s")
+                    params.append(documentos_nuevos)
+
+                if documentos_actualizados is not None:
+                    updates.append("documentos_actualizados = %s")
+                    params.append(documentos_actualizados)
+
+                if documentos_descargados is not None:
+                    updates.append("documentos_descargados = %s")
+                    params.append(documentos_descargados)
+
+                if formularios_parseados_sac is not None:
+                    updates.append("formularios_parseados_sac = %s")
+                    params.append(formularios_parseados_sac)
+
+                if formularios_parseados_suctd is not None:
+                    updates.append("formularios_parseados_suctd = %s")
+                    params.append(formularios_parseados_suctd)
+
+                if formularios_parseados_fehaciente is not None:
+                    updates.append("formularios_parseados_fehaciente = %s")
+                    params.append(formularios_parseados_fehaciente)
+
+                if error_message is not None:
+                    updates.append("error_message = %s")
+                    params.append(error_message)
+
+                if duration_seconds is not None:
+                    updates.append("duration_seconds = %s")
+                    params.append(duration_seconds)
+
+                if updates:
+                    params.append(run_id)
+                    sql = f"UPDATE pipeline_runs SET {', '.join(updates)} WHERE id = %s"
+                    cursor.execute(sql, params)
+                    conn.commit()
+
+        except Error as e:
+            logger.error(f"Error al actualizar pipeline_run: {e}")
+
+    def get_pipeline_runs(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Obtiene los últimos pipeline_runs.
+
+        Args:
+            limit: Número máximo de resultados
+
+        Returns:
+            Lista de pipeline_runs
+        """
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor(dictionary=True)
+                cursor.execute("""
+                    SELECT * FROM pipeline_runs
+                    ORDER BY started_at DESC
+                    LIMIT %s
+                """, (limit,))
+                return cursor.fetchall()
+        except Error as e:
+            logger.error(f"Error al obtener pipeline_runs: {e}")
             return []
 
     def insert_raw_api_response(
