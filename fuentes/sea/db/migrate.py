@@ -222,12 +222,14 @@ class MigrationManager:
             conn.close()
 
             # Resumen
+            restantes = len(pending) - exitosas - fallidas
             print("\n" + "=" * 60)
             print("RESUMEN DE MIGRACIONES")
             print("=" * 60)
             print(f"Exitosas:   {exitosas}")
             print(f"Fallidas:   {fallidas}")
-            print(f"Pendientes: {len(pending)}")
+            if restantes > 0:
+                print(f"Restantes:  {restantes}")
             print("=" * 60)
 
             return (exitosas, fallidas)

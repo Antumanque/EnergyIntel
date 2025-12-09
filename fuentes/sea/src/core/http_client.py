@@ -16,6 +16,18 @@ from src.settings import Settings
 logger = logging.getLogger(__name__)
 
 
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable format."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    elif seconds < 60:
+        return f"{seconds:.1f}s"
+    else:
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes}m {secs:.1f}s"
+
+
 class HTTPClient:
     """
     Cliente HTTP para fetchear datos desde REST APIs.
@@ -77,6 +89,7 @@ class HTTPClient:
                 logger.info(f"Fetching {url[:100]}... (attempt {attempt + 1}/{self.max_retries + 1})")
 
                 # Make the HTTP request
+                fetch_start = time.perf_counter()
                 with httpx.Client(timeout=self.timeout) as client:
                     response = client.request(
                         method=method,
@@ -84,6 +97,7 @@ class HTTPClient:
                         follow_redirects=True,
                         **kwargs,
                     )
+                fetch_elapsed = time.perf_counter() - fetch_start
 
                 # Try to parse as JSON, fall back to text
                 # Fix encoding - la API del SEA usa ISO-8859-1 (Latin-1)
@@ -100,7 +114,7 @@ class HTTPClient:
                 # Check if response was successful
                 if response.is_success:
                     logger.info(
-                        f"Successfully fetched URL (status: {response.status_code})"
+                        f"Successfully fetched URL (status: {response.status_code}, took {format_duration(fetch_elapsed)})"
                     )
                     return response.status_code, data, None
                 else:
@@ -151,3 +165,6 @@ def get_http_client(settings: Settings) -> HTTPClient:
         Instancia configurada de HTTPClient
     """
     return HTTPClient(settings)
+
+
+__all__ = ["HTTPClient", "get_http_client", "format_duration"]

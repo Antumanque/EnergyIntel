@@ -214,12 +214,14 @@ class MigrationManager:
             conn.close()
 
             # Resumen
+            restantes = len(pending) - exitosas - fallidas
             logger.info("\n" + "="*70)
             logger.info("📊 RESUMEN DE MIGRACIONES")
             logger.info("="*70)
             logger.info(f"✅ Exitosas: {exitosas}")
             logger.info(f"❌ Fallidas: {fallidas}")
-            logger.info(f"📋 Total pendientes: {len(pending)}")
+            if restantes > 0:
+                logger.info(f"⏳ Restantes: {restantes}")
             logger.info("="*70)
 
             return (exitosas, fallidas)

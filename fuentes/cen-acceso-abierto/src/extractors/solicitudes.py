@@ -8,15 +8,77 @@ Este módulo implementa la lógica de extracción de datos desde la API del CEN:
 4. Guarda en base de datos con estrategia append-only
 """
 
+import asyncio
 import logging
+import math
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
+import httpx
+
 from src.http_client import APIClient, get_api_client
 from src.repositories.cen import CENDatabaseManager, get_cen_db_manager
+from src.schemas.solicitud import validate_documento, validate_solicitud
 from src.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+# Configuración de concurrencia
+DEFAULT_CONCURRENCY = 10
+
+# Estadísticas de validación
+_validation_stats = {"solicitudes_valid": 0, "solicitudes_invalid": 0,
+                     "documentos_valid": 0, "documentos_invalid": 0, "errors": []}
+
+
+def reset_validation_stats():
+    """Resetear estadísticas de validación."""
+    global _validation_stats
+    _validation_stats = {"solicitudes_valid": 0, "solicitudes_invalid": 0,
+                         "documentos_valid": 0, "documentos_invalid": 0, "errors": []}
+
+
+def get_validation_stats() -> dict:
+    """Obtener estadísticas de validación."""
+    return _validation_stats.copy()
+
+
+def log_validation_summary():
+    """Loguear resumen de validación."""
+    stats = get_validation_stats()
+    total_sol = stats["solicitudes_valid"] + stats["solicitudes_invalid"]
+    total_doc = stats["documentos_valid"] + stats["documentos_invalid"]
+
+    if total_sol > 0:
+        pct = (stats["solicitudes_valid"] / total_sol) * 100
+        if stats["solicitudes_invalid"] == 0:
+            logger.info(f"✓ Validación Pydantic solicitudes: {stats['solicitudes_valid']}/{total_sol} válidas (100%)")
+        else:
+            logger.warning(f"⚠ Validación Pydantic solicitudes: {stats['solicitudes_valid']}/{total_sol} válidas ({pct:.1f}%)")
+
+    if total_doc > 0:
+        pct = (stats["documentos_valid"] / total_doc) * 100
+        if stats["documentos_invalid"] == 0:
+            logger.info(f"✓ Validación Pydantic documentos: {stats['documentos_valid']}/{total_doc} válidos (100%)")
+        else:
+            logger.warning(f"⚠ Validación Pydantic documentos: {stats['documentos_valid']}/{total_doc} válidos ({pct:.1f}%)")
+
+    if stats["errors"]:
+        for err in stats["errors"][:5]:
+            logger.warning(f"  - {err}")
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable format."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    elif seconds < 60:
+        return f"{seconds:.1f}s"
+    else:
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes}m {secs:.1f}s"
 
 
 def flatten_documentos(documentos_by_solicitud: Dict[int, List[dict]]) -> List[dict]:
@@ -83,13 +145,16 @@ class SolicitudesExtractor:
 
     def fetch_solicitudes_by_year(self, anio: int) -> Tuple[bool, List[Dict[str, Any]]]:
         """
-        Extrae todas las solicitudes de un año específico.
+        Extrae todas las solicitudes.
+
+        NOTA: La API del CEN ignora el parámetro 'anio' y siempre retorna
+        TODAS las solicitudes. El parámetro se mantiene por compatibilidad.
 
         Usa tipo=6 de la API del CEN.
         Guarda la respuesta raw en raw_api_data antes de procesarla.
 
         Args:
-            anio: Año a extraer (ej: 2025)
+            anio: Año (ignorado por la API, se mantiene por compatibilidad)
 
         Returns:
             Tuple (success, solicitudes)
@@ -97,7 +162,7 @@ class SolicitudesExtractor:
             - solicitudes: Lista de diccionarios con datos de solicitudes
         """
         url = self.build_url(tipo=6, anio=anio, tipo_solicitud_id=0, solicitud_id=None)
-        logger.info(f"📡 Extrayendo solicitudes del año {anio}...")
+        logger.info("📡 Extrayendo todas las solicitudes de la API...")
 
         status_code, data, error = self.api_client.fetch_url(url)
 
@@ -107,13 +172,13 @@ class SolicitudesExtractor:
 
         if status_code == 200 and data:
             if isinstance(data, list):
-                logger.info(f"✅ {len(data)} solicitudes extraídas para el año {anio}")
+                logger.info(f"✅ {len(data)} solicitudes extraídas")
                 return True, data
             else:
                 logger.warning(f"⚠️ Respuesta inesperada (no es lista): {type(data)}")
                 return False, []
         else:
-            logger.error(f"❌ Error al extraer solicitudes del año {anio}: {error}")
+            logger.error(f"❌ Error al extraer solicitudes: {error}")
             return False, []
 
     def fetch_documentos_by_solicitud(self, solicitud_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
@@ -220,7 +285,7 @@ class SolicitudesExtractor:
         self, solicitud_ids: List[int]
     ) -> Dict[str, Any]:
         """
-        Extrae documentos para una lista de solicitud_ids.
+        Extrae documentos para una lista de solicitud_ids (secuencial).
 
         Args:
             solicitud_ids: Lista de IDs de solicitudes
@@ -270,6 +335,171 @@ class SolicitudesExtractor:
         )
 
         return results
+
+    async def _fetch_documentos_async(
+        self,
+        client: httpx.AsyncClient,
+        semaphore: asyncio.Semaphore,
+        solicitud_id: int
+    ) -> Tuple[int, bool, List[Dict[str, Any]]]:
+        """
+        Fetch documentos de una solicitud de forma asíncrona.
+
+        Returns:
+            Tupla (solicitud_id, success, documentos)
+        """
+        async with semaphore:
+            url = self.build_url(tipo=11, anio=None, tipo_solicitud_id=None, solicitud_id=solicitud_id)
+
+            try:
+                fetch_start = time.perf_counter()
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": "CEN-Acceso-Abierto-DataDumper/1.0",
+                        "Accept": "application/json, text/plain, */*",
+                    },
+                    follow_redirects=True,
+                )
+                fetch_elapsed = time.perf_counter() - fetch_start
+
+                if response.is_success:
+                    try:
+                        data = response.json()
+                    except Exception:
+                        data = []
+
+                    if isinstance(data, list):
+                        # Validar documentos
+                        for doc in data[:3]:  # Validar primeros 3 como muestra
+                            is_valid, _, error = validate_documento(doc)
+                            if is_valid:
+                                _validation_stats["documentos_valid"] += 1
+                            else:
+                                _validation_stats["documentos_invalid"] += 1
+                                if len(_validation_stats["errors"]) < 10:
+                                    _validation_stats["errors"].append(f"Doc {doc.get('id')}: {error}")
+
+                        # Guardar raw response si hay db_manager
+                        if self.db_manager:
+                            self.db_manager.insert_raw_api_response(url, response.status_code, data, None)
+                        return solicitud_id, True, data
+                    else:
+                        return solicitud_id, False, []
+                else:
+                    logger.warning(f"Solicitud {solicitud_id}: HTTP {response.status_code}")
+                    return solicitud_id, False, []
+
+            except httpx.TimeoutException:
+                logger.warning(f"Solicitud {solicitud_id}: timeout")
+                return solicitud_id, False, []
+            except Exception as e:
+                logger.warning(f"Solicitud {solicitud_id}: error {e}")
+                return solicitud_id, False, []
+
+    async def extract_documentos_parallel_async(
+        self,
+        solicitud_ids: List[int],
+        concurrency: int = DEFAULT_CONCURRENCY
+    ) -> Dict[str, Any]:
+        """
+        Extrae documentos en paralelo para una lista de solicitud_ids.
+
+        Args:
+            solicitud_ids: Lista de IDs de solicitudes
+            concurrency: Número de requests paralelos
+
+        Returns:
+            Diccionario con resultados
+        """
+        results = {
+            "total_solicitudes": len(solicitud_ids),
+            "successful_solicitudes": 0,
+            "total_documentos": 0,
+            "documentos_importantes": 0,
+            "documentos_by_solicitud": {},
+        }
+
+        if not solicitud_ids:
+            return results
+
+        logger.info(
+            f"📡 Extrayendo documentos de {len(solicitud_ids)} solicitudes "
+            f"(concurrencia: {concurrency})..."
+        )
+
+        semaphore = asyncio.Semaphore(concurrency)
+        batch_size = concurrency
+
+        async with httpx.AsyncClient(timeout=self.settings.request_timeout) as client:
+            # Procesar en batches para mostrar progreso
+            for batch_start in range(0, len(solicitud_ids), batch_size):
+                batch_ids = solicitud_ids[batch_start:batch_start + batch_size]
+                batch_num = (batch_start // batch_size) + 1
+                total_batches = math.ceil(len(solicitud_ids) / batch_size)
+
+                batch_start_time = time.perf_counter()
+
+                # Lanzar requests del batch en paralelo
+                tasks = [
+                    self._fetch_documentos_async(client, semaphore, sid)
+                    for sid in batch_ids
+                ]
+                batch_results = await asyncio.gather(*tasks)
+
+                batch_elapsed = time.perf_counter() - batch_start_time
+
+                # Procesar resultados del batch
+                batch_docs = 0
+                batch_important = 0
+                batch_success = 0
+
+                for solicitud_id, success, documentos in batch_results:
+                    if success:
+                        batch_success += 1
+                        results["successful_solicitudes"] += 1
+                        results["total_documentos"] += len(documentos)
+                        batch_docs += len(documentos)
+
+                        # Filtrar documentos importantes
+                        documentos_importantes = self.filter_documentos_importantes(documentos)
+                        results["documentos_importantes"] += len(documentos_importantes)
+                        batch_important += len(documentos_importantes)
+                        results["documentos_by_solicitud"][solicitud_id] = documentos_importantes
+                    else:
+                        results["documentos_by_solicitud"][solicitud_id] = []
+
+                # Log de progreso cada batch
+                processed = min(batch_start + batch_size, len(solicitud_ids))
+                logger.info(
+                    f"BATCH {batch_num}/{total_batches}: "
+                    f"{batch_success}/{len(batch_ids)} OK, "
+                    f"{batch_important} docs importantes "
+                    f"(took {format_duration(batch_elapsed)}, "
+                    f"total: {processed}/{len(solicitud_ids)})"
+                )
+
+        logger.info(
+            f"📊 Extracción paralela completada: "
+            f"{results['successful_solicitudes']}/{results['total_solicitudes']} solicitudes, "
+            f"{results['documentos_importantes']} documentos importantes"
+        )
+
+        # Loguear resumen de validación
+        log_validation_summary()
+
+        return results
+
+    def extract_documentos_parallel(
+        self,
+        solicitud_ids: List[int],
+        concurrency: int = DEFAULT_CONCURRENCY
+    ) -> Dict[str, Any]:
+        """
+        Wrapper síncrono para extract_documentos_parallel_async.
+        """
+        reset_validation_stats()  # Reset antes de nueva extracción
+        return asyncio.run(self.extract_documentos_parallel_async(solicitud_ids, concurrency))
 
     def run(self) -> int:
         """

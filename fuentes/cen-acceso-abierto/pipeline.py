@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-🚀 CEN Acceso Abierto - Pipeline Completo Automatizado con Reproceso
+CEN Acceso Abierto - Pipeline Completo Automatizado con Reproceso
 
-Entry point único que ejecuta el pipeline completo end-to-end:
+Entry point que ejecuta el pipeline completo end-to-end:
 
 COMPORTAMIENTO POR DEFECTO (INCREMENTAL + REPROCESO):
-1. Extracción de solicitudes (incremental, solo nuevas)
-2. Extracción de documentos (incremental, solo de solicitudes nuevas)
-3. RE-EXTRACCIÓN de documentos para solicitudes sin documentos (fallidas previamente)
+1. Extraccion de solicitudes (incremental, solo nuevas)
+2. Extraccion de documentos (incremental, solo de solicitudes nuevas)
+3. RE-EXTRACCION de documentos para solicitudes sin documentos (fallidas previamente)
 4. Descarga de documentos pendientes (downloaded = 0)
 5. Parsing de formularios (SAC, SUCTD, FEHACIENTE) - incluye reproceso de fallidos
 
-CARACTERÍSTICAS:
-- ✅ Idempotente: Se puede ejecutar múltiples veces sin duplicar datos
-- ✅ Incremental: Solo procesa datos nuevos
-- ✅ Reproceso automático: Re-procesa todo lo que falló en stages anteriores
-- ✅ Append-only: Nunca actualiza ni borra, solo inserta
-- ✅ Detección automática: Si no hay datos, carga desde 0
-- ✅ Estadísticas completas: Reporte detallado al final
+CARACTERISTICAS:
+- Idempotente: Se puede ejecutar multiples veces sin duplicar datos
+- Incremental: Solo procesa datos nuevos
+- Reproceso automatico: Re-procesa todo lo que fallo en stages anteriores
+- Append-only: Nunca actualiza ni borra, solo inserta
+- Deteccion automatica: Si no hay datos, carga desde 0
+- Estadisticas completas: Reporte detallado al final
 
 EJEMPLO DE USO:
     # Ejecutar todo el pipeline (nuevos + reproceso de fallidos)
     python pipeline.py
 
-    # Solo extracción (solicitudes + documentos + reproceso)
+    # Solo extraccion (solicitudes + documentos + reproceso)
     python pipeline.py --solo-fetch
 
     # Solo descarga (incluye pendientes + fallidos)
@@ -38,34 +38,36 @@ EJEMPLO DE USO:
     # Procesar solo un tipo de formulario
     python pipeline.py --tipos SAC
 
-    # Modo dry-run (ver qué se haría sin ejecutar)
-    python pipeline.py --dry-run
+    # Modo preview (ver que se insertaria/actualizaria sin ejecutar)
+    python pipeline.py --preview
+    python pipeline.py --preview --output report.json
 
-Fecha: 2025-11-06 (Actualizado con reproceso automático)
+Fecha: 2025-11-06 (Actualizado con reproceso automatico)
 """
 
 import argparse
-import logging
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Configure loguru (must be before other local imports)
+from src.logging_config import logger
 
 
 class PipelineOrchestrator:
     """Orquestador del pipeline completo."""
 
-    def __init__(self, dry_run: bool = False):
-        self.dry_run = dry_run
+    def __init__(self, preview: bool = False, output_file: Optional[str] = None):
+        self.preview = preview
+        self.output_file = output_file
         self.pipeline_run_id = None
         self.db_manager = None
+        self.preview_data = {
+            "solicitudes": {"nuevas": [], "actualizadas": [], "sin_cambios": []},
+            "documentos": {"nuevos": [], "actualizados": [], "sin_cambios": []}
+        }
         self.stats = {
             # Solicitudes
             "solicitudes_en_api": 0,
@@ -98,7 +100,7 @@ class PipelineOrchestrator:
 
     def _start_pipeline_run(self):
         """Inicia un nuevo pipeline_run en la BD."""
-        if self.dry_run:
+        if self.preview:
             return
 
         self._init_db_manager()
@@ -106,7 +108,7 @@ class PipelineOrchestrator:
 
     def _finish_pipeline_run(self, status: str, error_message: str = None, duration_seconds: int = None):
         """Finaliza el pipeline_run con estadísticas."""
-        if self.dry_run or not self.pipeline_run_id:
+        if self.preview or not self.pipeline_run_id:
             return
 
         self.db_manager.update_pipeline_run(
@@ -154,10 +156,6 @@ class PipelineOrchestrator:
         """
         self.print_section("PASO 1: Extracción de Solicitudes")
 
-        if self.dry_run:
-            logger.info("🔍 [DRY RUN] Se extraerían solicitudes de la API...")
-            return {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
-
         try:
             from src.extractors.solicitudes import get_solicitudes_extractor
 
@@ -174,36 +172,46 @@ class PipelineOrchestrator:
             self.stats["solicitudes_en_api"] = len(all_solicitudes)
             logger.info(f"📊 Total solicitudes en la API: {len(all_solicitudes)}")
 
-            # UPSERT inteligente (detecta cambios reales)
-            if all_solicitudes:
-                result = extractor.db_manager.insert_solicitudes_bulk(
-                    all_solicitudes,
-                    pipeline_run_id=self.pipeline_run_id
-                )
-                self.stats["solicitudes_nuevas"] = result["nuevas"]
-                self.stats["solicitudes_actualizadas"] = result["actualizadas"]
-                self.stats["solicitudes_sin_cambios"] = result["sin_cambios"]
-                return result
-            else:
+            if not all_solicitudes:
                 logger.info("\n✅ No hay solicitudes para procesar")
                 return {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
+
+            # MODO PREVIEW: solo analizar sin escribir
+            if self.preview:
+                preview_result = extractor.db_manager.preview_solicitudes_bulk(all_solicitudes)
+                self.preview_data["solicitudes"] = {
+                    "nuevas": preview_result["nuevas"],
+                    "actualizadas": preview_result["actualizadas"],
+                    "sin_cambios": preview_result["sin_cambios"]
+                }
+                self.stats["solicitudes_nuevas"] = preview_result["counts"]["nuevas"]
+                self.stats["solicitudes_actualizadas"] = preview_result["counts"]["actualizadas"]
+                self.stats["solicitudes_sin_cambios"] = preview_result["counts"]["sin_cambios"]
+                return preview_result["counts"]
+
+            # MODO NORMAL: UPSERT inteligente (detecta cambios reales)
+            result = extractor.db_manager.insert_solicitudes_bulk(all_solicitudes, self.pipeline_run_id)
+            self.stats["solicitudes_nuevas"] = result["nuevas"]
+            self.stats["solicitudes_actualizadas"] = result["actualizadas"]
+            self.stats["solicitudes_sin_cambios"] = result["sin_cambios"]
+            return result
 
         except Exception as e:
             logger.error(f"❌ Error en extracción de solicitudes: {e}", exc_info=True)
             raise
 
-    def step_2_fetch_documentos(self) -> Dict[str, int]:
+    def step_2_fetch_documentos(self, use_parallel: bool = True) -> Dict[str, int]:
         """
         Extrae documentos de cada solicitud.
+
+        Args:
+            use_parallel: Si True, usa extracción paralela (10 requests simultáneos)
 
         Returns:
             Dict con conteos: {"nuevos": N, "actualizados": N, "sin_cambios": N}
         """
-        self.print_section("PASO 2: Extracción de Documentos")
-
-        if self.dry_run:
-            logger.info("🔍 [DRY RUN] Se extraerían documentos de solicitudes...")
-            return {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+        mode = "PARALELO" if use_parallel else "SECUENCIAL"
+        self.print_section(f"PASO 2: Extracción de Documentos ({mode})")
 
         try:
             from src.extractors.solicitudes import get_solicitudes_extractor, flatten_documentos
@@ -221,40 +229,58 @@ class PipelineOrchestrator:
                 return {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
 
             # Extraer documentos de todas las solicitudes
-            result = extractor.extract_documentos_for_solicitudes(solicitud_ids)
-
-            # UPSERT inteligente de documentos
-            all_documentos = flatten_documentos(result["documentos_by_solicitud"])
-            if all_documentos:
-                doc_result = db_manager.insert_documentos_bulk(
-                    all_documentos,
-                    pipeline_run_id=self.pipeline_run_id
-                )
-                self.stats["documentos_nuevos"] = doc_result["nuevos"]
-                self.stats["documentos_actualizados"] = doc_result["actualizados"]
-                return doc_result
+            if use_parallel:
+                result = extractor.extract_documentos_parallel(solicitud_ids, concurrency=10)
             else:
+                result = extractor.extract_documentos_for_solicitudes(solicitud_ids)
+
+            # Flatten documentos
+            all_documentos = flatten_documentos(result["documentos_by_solicitud"])
+
+            if not all_documentos:
                 logger.info("\n✅ No hay documentos nuevos para insertar")
                 return {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+
+            # MODO PREVIEW: solo analizar sin escribir
+            if self.preview:
+                preview_result = db_manager.preview_documentos_bulk(all_documentos)
+                self.preview_data["documentos"] = {
+                    "nuevos": preview_result["nuevos"],
+                    "actualizados": preview_result["actualizados"],
+                    "sin_cambios": preview_result["sin_cambios"]
+                }
+                self.stats["documentos_nuevos"] = preview_result["counts"]["nuevos"]
+                self.stats["documentos_actualizados"] = preview_result["counts"]["actualizados"]
+                return preview_result["counts"]
+
+            # MODO NORMAL: UPSERT inteligente de documentos
+            doc_result = db_manager.insert_documentos_bulk(all_documentos)
+            self.stats["documentos_nuevos"] = doc_result["nuevos"]
+            self.stats["documentos_actualizados"] = doc_result["actualizados"]
+            return doc_result
 
         except Exception as e:
             logger.error(f"❌ Error en extracción de documentos: {e}", exc_info=True)
             raise
 
-    def step_2b_reextract_documentos_solicitudes_sin_docs(self) -> int:
+    def step_2b_reextract_documentos_solicitudes_sin_docs(self, use_parallel: bool = True) -> int:
         """
         RE-EXTRAE documentos de solicitudes que NO TIENEN documentos en la BD.
 
         Estas son solicitudes que fallaron en el paso de extracción de documentos
         en ejecuciones anteriores.
 
+        Args:
+            use_parallel: Si True, usa extracción paralela
+
         Returns:
             Número de solicitudes reprocesadas
         """
-        self.print_section("PASO 2B: Re-extracción de Documentos para Solicitudes Sin Documentos")
+        mode = "PARALELO" if use_parallel else "SECUENCIAL"
+        self.print_section(f"PASO 2B: Re-extracción de Documentos ({mode})")
 
-        if self.dry_run:
-            logger.info("🔍 [DRY RUN] Se re-extraerían documentos de solicitudes sin docs...")
+        if self.preview:
+            logger.info("🔍 [PREVIEW] Saltando re-extracción (solo aplica a ejecución real)")
             return 0
 
         try:
@@ -276,7 +302,10 @@ class PipelineOrchestrator:
             extractor = get_solicitudes_extractor()
 
             # Re-extraer documentos de estas solicitudes
-            result = extractor.extract_documentos_for_solicitudes(solicitudes_sin_docs)
+            if use_parallel:
+                result = extractor.extract_documentos_parallel(solicitudes_sin_docs, concurrency=10)
+            else:
+                result = extractor.extract_documentos_for_solicitudes(solicitudes_sin_docs)
 
             total_reextraidos = result.get("documentos_importantes", 0)
             logger.info(f"\n✅ Documentos re-extraídos: {total_reextraidos}")
@@ -304,8 +333,8 @@ class PipelineOrchestrator:
         """
         self.print_section("PASO 3: Descarga de Documentos")
 
-        if self.dry_run:
-            logger.info("🔍 [DRY RUN] Se descargarían documentos pendientes...")
+        if self.preview:
+            logger.info("🔍 [PREVIEW] Saltando descarga (solo aplica a ejecución real)")
             return {"SAC": 0, "SUCTD": 0, "FEHACIENTE": 0}
 
         tipos_documento = {
@@ -363,8 +392,8 @@ class PipelineOrchestrator:
         if tipos is None:
             tipos = ["SAC", "SUCTD", "FEHACIENTE"]
 
-        if self.dry_run:
-            logger.info(f"🔍 [DRY RUN] Se parsearían formularios: {', '.join(tipos)}")
+        if self.preview:
+            logger.info(f"🔍 [PREVIEW] Saltando parsing (solo aplica a ejecución real)")
             return {t: 0 for t in tipos}
 
         parse_count = {}
@@ -407,11 +436,14 @@ class PipelineOrchestrator:
 
     def print_final_report(self, elapsed_seconds: float):
         """Imprime reporte final consolidado."""
-        self.print_header("📊 REPORTE FINAL DEL PIPELINE")
+        mode_label = "PREVIEW" if self.preview else "REPORTE FINAL"
+        self.print_header(f"📊 {mode_label} DEL PIPELINE")
 
         if self.pipeline_run_id:
             print(f"🆔 Pipeline Run ID: #{self.pipeline_run_id}")
         print(f"⏱️  Tiempo total: {elapsed_seconds:.1f} segundos ({elapsed_seconds/60:.1f} minutos)\n")
+
+        action_verb = "Se insertarían/actualizarían" if self.preview else "Insertadas/actualizadas"
 
         # Solicitudes
         print("1️⃣  SOLICITUDES:")
@@ -427,26 +459,149 @@ class PipelineOrchestrator:
         print(f"   • Actualizados:  {self.stats['documentos_actualizados']}")
         print()
 
-        # Reproceso
-        print("3️⃣  REPROCESO DE FALLIDOS:")
-        print(f"   • Solicitudes reprocesadas: {self.stats['solicitudes_sin_docs_reprocesadas']}")
-        print(f"   • Documentos re-extraídos:  {self.stats['documentos_reextraidos']}")
-        print()
+        if not self.preview:
+            # Reproceso (solo en modo ejecución real)
+            print("3️⃣  REPROCESO DE FALLIDOS:")
+            print(f"   • Solicitudes reprocesadas: {self.stats['solicitudes_sin_docs_reprocesadas']}")
+            print(f"   • Documentos re-extraídos:  {self.stats['documentos_reextraidos']}")
+            print()
 
-        # Descarga
-        print("4️⃣  DESCARGA:")
-        print(f"   • Documentos descargados:   {self.stats['documentos_descargados']}")
-        print()
+            # Descarga
+            print("4️⃣  DESCARGA:")
+            print(f"   • Documentos descargados:   {self.stats['documentos_descargados']}")
+            print()
 
-        # Parsing
-        print("5️⃣  PARSING:")
-        for tipo, count in self.stats['formularios_parseados'].items():
-            print(f"   • {tipo:12s} parseados:  {count}")
-        print()
+            # Parsing
+            print("5️⃣  PARSING:")
+            for tipo, count in self.stats['formularios_parseados'].items():
+                print(f"   • {tipo:12s} parseados:  {count}")
+            print()
 
-        total_parseados = sum(self.stats['formularios_parseados'].values())
-        print(f"✅ Total formularios parseados: {total_parseados}")
+            total_parseados = sum(self.stats['formularios_parseados'].values())
+            print(f"✅ Total formularios parseados: {total_parseados}")
+
         print("=" * 100)
+
+    def print_preview_details(self):
+        """Imprime detalles de los cambios detectados en modo preview."""
+        self.print_header("🔍 DETALLES DEL PREVIEW")
+
+        # Nuevas solicitudes
+        nuevas_sol = self.preview_data["solicitudes"]["nuevas"]
+        if nuevas_sol:
+            print(f"\n📥 SOLICITUDES NUEVAS ({len(nuevas_sol)}):")
+            for sol in nuevas_sol[:10]:  # Mostrar solo primeras 10
+                print(f"   • ID {sol['id']}: {sol.get('proyecto', 'Sin nombre')} ({sol.get('razon_social', 'N/A')})")
+            if len(nuevas_sol) > 10:
+                print(f"   ... y {len(nuevas_sol) - 10} más")
+
+        # Solicitudes actualizadas
+        actualizadas_sol = self.preview_data["solicitudes"]["actualizadas"]
+        if actualizadas_sol:
+            print(f"\n📝 SOLICITUDES CON CAMBIOS ({len(actualizadas_sol)}):")
+            for sol in actualizadas_sol[:10]:
+                print(f"   • ID {sol['id']}: {sol.get('proyecto', 'Sin nombre')}")
+                if '_changed_fields' in sol:
+                    for change in sol['_changed_fields'][:3]:
+                        print(f"      - {change['field']}: {change['old']} → {change['new']}")
+                    if len(sol['_changed_fields']) > 3:
+                        print(f"      ... y {len(sol['_changed_fields']) - 3} campos más")
+            if len(actualizadas_sol) > 10:
+                print(f"   ... y {len(actualizadas_sol) - 10} más")
+
+        # Nuevos documentos
+        nuevos_doc = self.preview_data["documentos"]["nuevos"]
+        if nuevos_doc:
+            print(f"\n📥 DOCUMENTOS NUEVOS ({len(nuevos_doc)}):")
+            for doc in nuevos_doc[:10]:
+                print(f"   • ID {doc['id']}: {doc.get('tipo_documento', 'N/A')} - {doc.get('nombre', 'Sin nombre')[:50]}")
+            if len(nuevos_doc) > 10:
+                print(f"   ... y {len(nuevos_doc) - 10} más")
+
+        # Documentos actualizados
+        actualizados_doc = self.preview_data["documentos"]["actualizados"]
+        if actualizados_doc:
+            print(f"\n📝 DOCUMENTOS CON CAMBIOS ({len(actualizados_doc)}):")
+            for doc in actualizados_doc[:10]:
+                print(f"   • ID {doc['id']}: {doc.get('nombre', 'Sin nombre')[:50]}")
+                if '_changed_fields' in doc:
+                    for change in doc['_changed_fields'][:3]:
+                        print(f"      - {change['field']}: {change['old']} → {change['new']}")
+            if len(actualizados_doc) > 10:
+                print(f"   ... y {len(actualizados_doc) - 10} más")
+
+        print("\n" + "=" * 100)
+
+    def save_preview_report(self):
+        """Guarda el reporte de preview en un archivo JSON."""
+        if not self.output_file:
+            return
+
+        # Obtener estadísticas de validación Pydantic
+        from src.extractors.solicitudes import get_validation_stats
+        validation_stats = get_validation_stats()
+
+        # Preparar datos para JSON (limpiar campos internos)
+        def clean_for_json(data: Dict[str, Any]) -> Dict[str, Any]:
+            """Limpia datos para serialización JSON."""
+            cleaned = {}
+            for key, value in data.items():
+                if key.startswith('_'):
+                    continue
+                if hasattr(value, 'isoformat'):
+                    cleaned[key] = value.isoformat()
+                elif isinstance(value, dict):
+                    cleaned[key] = clean_for_json(value)
+                elif isinstance(value, list):
+                    cleaned[key] = [clean_for_json(v) if isinstance(v, dict) else v for v in value]
+                else:
+                    cleaned[key] = value
+            return cleaned
+
+        # Calcular resumen de validación
+        total_sol = validation_stats["solicitudes_valid"] + validation_stats["solicitudes_invalid"]
+        total_doc = validation_stats["documentos_valid"] + validation_stats["documentos_invalid"]
+
+        report = {
+            "generated_at": datetime.now().isoformat(),
+            "validation": {
+                "solicitudes": {
+                    "valid": validation_stats["solicitudes_valid"],
+                    "invalid": validation_stats["solicitudes_invalid"],
+                    "total": total_sol,
+                    "success_rate": f"{(validation_stats['solicitudes_valid'] / total_sol * 100):.1f}%" if total_sol > 0 else "N/A"
+                },
+                "documentos": {
+                    "valid": validation_stats["documentos_valid"],
+                    "invalid": validation_stats["documentos_invalid"],
+                    "total": total_doc,
+                    "success_rate": f"{(validation_stats['documentos_valid'] / total_doc * 100):.1f}%" if total_doc > 0 else "N/A"
+                },
+                "errors": validation_stats["errors"][:10] if validation_stats["errors"] else []
+            },
+            "stats": self.stats,
+            "solicitudes": {
+                "nuevas": [clean_for_json(s) for s in self.preview_data["solicitudes"]["nuevas"]],
+                "actualizadas": [
+                    {**clean_for_json(s), "cambios": s.get('_changed_fields', [])}
+                    for s in self.preview_data["solicitudes"]["actualizadas"]
+                ],
+                "sin_cambios_count": len(self.preview_data["solicitudes"]["sin_cambios"])
+            },
+            "documentos": {
+                "nuevos": [clean_for_json(d) for d in self.preview_data["documentos"]["nuevos"]],
+                "actualizados": [
+                    {**clean_for_json(d), "cambios": d.get('_changed_fields', [])}
+                    for d in self.preview_data["documentos"]["actualizados"]
+                ],
+                "sin_cambios_count": len(self.preview_data["documentos"]["sin_cambios"])
+            }
+        }
+
+        with open(self.output_file, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"📄 Reporte guardado en: {self.output_file}")
 
     def run_full_pipeline(self, **kwargs):
         """Ejecuta el pipeline completo."""
@@ -454,7 +609,7 @@ class PipelineOrchestrator:
 
         self.print_header("🚀 PIPELINE COMPLETO CEN ACCESO ABIERTO")
         logger.info(f"📅 Fecha: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"🔧 Modo: {'DRY RUN' if self.dry_run else 'EJECUCIÓN REAL'}")
+        logger.info(f"🔧 Modo: {'PREVIEW (sin escribir a BD)' if self.preview else 'EJECUCIÓN REAL'}")
         logger.info("")
 
         # Iniciar tracking del pipeline run
@@ -465,7 +620,7 @@ class PipelineOrchestrator:
             if not kwargs.get('skip_fetch'):
                 self.step_1_fetch_solicitudes()
                 self.step_2_fetch_documentos()
-                # NUEVO: Re-extraer documentos de solicitudes sin docs (reproceso)
+                # Re-extraer documentos de solicitudes sin docs (reproceso)
                 self.step_2b_reextract_documentos_solicitudes_sin_docs()
 
             # Paso 2: Descarga de documentos (ya incluye reproceso de pendientes)
@@ -482,6 +637,11 @@ class PipelineOrchestrator:
             # Reporte final
             elapsed = (datetime.now() - start_time).total_seconds()
             self.print_final_report(elapsed)
+
+            # En modo preview, mostrar detalles y guardar reporte
+            if self.preview:
+                self.print_preview_details()
+                self.save_preview_report()
 
             # Finalizar tracking exitoso
             self._finish_pipeline_run(
@@ -522,7 +682,7 @@ Ejemplos de uso:
   # Ejecutar todo el pipeline
   python pipeline.py
 
-  # Solo extracción (solicitudes + documentos)
+  # Solo extraccion (solicitudes + documentos)
   python pipeline.py --solo-fetch
 
   # Solo descarga
@@ -531,11 +691,14 @@ Ejemplos de uso:
   # Solo parsing
   python pipeline.py --solo-parse
 
-  # Procesar solo SAC con límite de 100 docs
+  # Procesar solo SAC con limite de 100 docs
   python pipeline.py --tipos SAC --limit 100
 
-  # Dry run (ver qué se haría sin ejecutar)
-  python pipeline.py --dry-run
+  # Preview: ver que se insertaria/actualizaria sin ejecutar
+  python pipeline.py --preview
+
+  # Preview con reporte JSON
+  python pipeline.py --preview --output report.json
         """
     )
 
@@ -567,19 +730,36 @@ Ejemplos de uso:
     parser.add_argument(
         '--limit',
         type=int,
-        help='Límite de documentos a procesar por tipo (para testing)'
+        help='Limite de documentos a procesar por tipo (para testing)'
     )
 
     parser.add_argument(
-        '--dry-run',
+        '--preview',
         action='store_true',
-        help='Modo dry-run: mostrar qué se haría sin ejecutar'
+        help='Modo preview: consulta API, compara con BD, muestra que se insertaria/actualizaria sin escribir'
+    )
+
+    parser.add_argument(
+        '--output', '-o',
+        type=str,
+        metavar='FILE',
+        help='Archivo JSON para guardar el reporte de preview (solo con --preview)'
     )
 
     args = parser.parse_args()
 
+    # Validar argumentos
+    if args.output and not args.preview:
+        parser.error("--output solo se puede usar con --preview")
+
+    # En modo preview, generar nombre de archivo automático si no se especificó
+    output_file = args.output
+    if args.preview and not output_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"preview_{timestamp}.json"
+
     # Crear orchestrator
-    orchestrator = PipelineOrchestrator(dry_run=args.dry_run)
+    orchestrator = PipelineOrchestrator(preview=args.preview, output_file=output_file)
 
     # Ejecutar pipeline
     exit_code = orchestrator.run_full_pipeline(

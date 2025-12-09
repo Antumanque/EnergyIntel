@@ -5,6 +5,7 @@ Este módulo extiende database.py con operaciones específicas para las tablas
 solicitudes y documentos.
 """
 
+import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime
@@ -132,10 +133,157 @@ class CENDatabaseManager:
             logger.error(f"Error al obtener IDs de solicitudes existentes: {e}")
             return set()
 
+    # Campos a comparar para detectar cambios en solicitudes
+    # Nota: api_update_date es el timestamp del CEN (antes llamado update_date)
+    SOLICITUD_COMPARE_FIELDS = [
+        'tipo_solicitud_id', 'tipo_solicitud', 'estado_solicitud_id', 'estado_solicitud',
+        'api_update_date', 'proyecto_id', 'proyecto', 'rut_empresa', 'razon_social',
+        'tipo_tecnologia_nombre', 'potencia_nominal', 'comuna_id', 'comuna',
+        'provincia_id', 'provincia', 'region_id', 'region', 'lat', 'lng',
+        'nombre_se', 'nivel_tension', 'seccion_barra_conexion', 'pano_conexion',
+        'fecha_estimada_conexion', 'calificacion_id', 'calificacion_nombre',
+        'etapa_id', 'etapa', 'nup', 'cup', 'deleted_at', 'cancelled_at'
+    ]
+
+    # Campos a comparar para detectar cambios en documentos
+    DOCUMENTO_COMPARE_FIELDS = [
+        'solicitud_id', 'nombre', 'ruta_s3', 'tipo_documento_id', 'tipo_documento',
+        'empresa_id', 'razon_social', 'api_update_date', 'estado_solicitud_id',
+        'etapa_id', 'etapa', 'version_id', 'visible', 'deleted'
+    ]
+
+    def _normalize_solicitudes(self, solicitudes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Normaliza fechas ISO a formato MySQL en solicitudes."""
+        for solicitud in solicitudes:
+            solicitud['create_date'] = parse_iso_datetime(solicitud.get('create_date'))
+            # API field 'update_date' maps to our 'api_update_date' column
+            solicitud['api_update_date'] = parse_iso_datetime(solicitud.get('update_date'))
+            solicitud['deleted_at'] = parse_iso_datetime(solicitud.get('deleted_at'))
+            solicitud['cancelled_at'] = parse_iso_datetime(solicitud.get('cancelled_at'))
+            solicitud['fecha_estimada_conexion'] = parse_iso_date(solicitud.get('fecha_estimada_conexion'))
+        return solicitudes
+
+    def _classify_solicitudes(
+        self,
+        solicitudes: List[Dict[str, Any]],
+        existing: Dict[int, Dict[str, Any]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Clasifica solicitudes en nuevas, actualizadas, y sin cambios.
+
+        Returns:
+            Dict con listas: {"nuevas": [...], "actualizadas": [...], "sin_cambios": [...]}
+        """
+        nuevas = []
+        actualizadas = []
+        sin_cambios = []
+
+        for sol in solicitudes:
+            sol_id = sol['id']
+
+            if sol_id not in existing:
+                nuevas.append(sol)
+            else:
+                old = existing[sol_id]
+                has_changes = False
+                changed_fields = []
+
+                for field in self.SOLICITUD_COMPARE_FIELDS:
+                    old_val = old.get(field)
+                    new_val = sol.get(field)
+
+                    # Normalizar para comparación
+                    if old_val is not None and hasattr(old_val, 'strftime'):
+                        old_val = old_val.strftime('%Y-%m-%d %H:%M:%S') if hasattr(old_val, 'hour') else old_val.strftime('%Y-%m-%d')
+
+                    if str(old_val) != str(new_val):
+                        has_changes = True
+                        changed_fields.append({
+                            'field': field,
+                            'old': old_val,
+                            'new': new_val
+                        })
+
+                if has_changes:
+                    sol['_changed_fields'] = changed_fields
+                    actualizadas.append(sol)
+                else:
+                    sin_cambios.append(sol)
+
+        return {"nuevas": nuevas, "actualizadas": actualizadas, "sin_cambios": sin_cambios}
+
+    def preview_solicitudes_bulk(
+        self,
+        solicitudes: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Previsualiza qué solicitudes serían insertadas/actualizadas sin escribir a la BD.
+
+        Args:
+            solicitudes: Lista de diccionarios con datos de solicitudes
+
+        Returns:
+            Dict con listas detalladas:
+            {
+                "nuevas": [lista de solicitudes nuevas],
+                "actualizadas": [lista de solicitudes con cambios, incluye _changed_fields],
+                "sin_cambios": [lista de solicitudes sin cambios],
+                "counts": {"nuevas": N, "actualizadas": N, "sin_cambios": N}
+            }
+        """
+        if not solicitudes:
+            return {
+                "nuevas": [], "actualizadas": [], "sin_cambios": [],
+                "counts": {"nuevas": 0, "actualizadas": 0, "sin_cambios": 0}
+            }
+
+        logger.info(f"🔍 [PREVIEW] Analizando {len(solicitudes)} solicitudes...")
+
+        # Normalizar fechas
+        solicitudes = self._normalize_solicitudes(solicitudes)
+
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor(dictionary=True)
+
+                # Obtener solicitudes existentes
+                existing_ids = {s['id'] for s in solicitudes}
+                if existing_ids:
+                    format_strings = ','.join(['%s'] * len(existing_ids))
+                    cursor.execute(
+                        f"SELECT * FROM solicitudes WHERE id IN ({format_strings})",
+                        tuple(existing_ids)
+                    )
+                    existing = {row['id']: row for row in cursor.fetchall()}
+                else:
+                    existing = {}
+
+                # Clasificar
+                classified = self._classify_solicitudes(solicitudes, existing)
+
+                logger.info(
+                    f"🔍 [PREVIEW] Solicitudes: {len(classified['nuevas'])} nuevas, "
+                    f"{len(classified['actualizadas'])} actualizadas, "
+                    f"{len(classified['sin_cambios'])} sin cambios"
+                )
+
+                return {
+                    **classified,
+                    "counts": {
+                        "nuevas": len(classified['nuevas']),
+                        "actualizadas": len(classified['actualizadas']),
+                        "sin_cambios": len(classified['sin_cambios'])
+                    }
+                }
+
+        except Error as e:
+            logger.error(f"❌ Error en preview de solicitudes: {e}", exc_info=True)
+            raise
+
     def insert_solicitudes_bulk(
         self,
         solicitudes: List[Dict[str, Any]],
-        pipeline_run_id: Optional[int] = None
+        pipeline_run_id: int | None = None
     ) -> Dict[str, int]:
         """
         Inserta o actualiza solicitudes con detección de cambios reales.
@@ -149,7 +297,7 @@ class CENDatabaseManager:
 
         Args:
             solicitudes: Lista de diccionarios con datos de solicitudes
-            pipeline_run_id: ID del pipeline_run actual (opcional)
+            pipeline_run_id: ID del pipeline run para historial
 
         Returns:
             Dict con conteos: {"nuevas": N, "actualizadas": N, "sin_cambios": N}
@@ -163,12 +311,7 @@ class CENDatabaseManager:
         logger.info(f"📥 Procesando {len(solicitudes)} solicitudes (UPSERT inteligente)...")
 
         # Normalizar fechas ISO a formato MySQL
-        for solicitud in solicitudes:
-            solicitud['create_date'] = parse_iso_datetime(solicitud.get('create_date'))
-            solicitud['update_date'] = parse_iso_datetime(solicitud.get('update_date'))
-            solicitud['deleted_at'] = parse_iso_datetime(solicitud.get('deleted_at'))
-            solicitud['cancelled_at'] = parse_iso_datetime(solicitud.get('cancelled_at'))
-            solicitud['fecha_estimada_conexion'] = parse_iso_date(solicitud.get('fecha_estimada_conexion'))
+        solicitudes = self._normalize_solicitudes(solicitudes)
 
         try:
             with self.connection() as conn:
@@ -186,71 +329,33 @@ class CENDatabaseManager:
                 else:
                     existing = {}
 
-                # Campos a comparar para detectar cambios
-                compare_fields = [
-                    'tipo_solicitud_id', 'tipo_solicitud', 'estado_solicitud_id', 'estado_solicitud',
-                    'update_date', 'proyecto_id', 'proyecto', 'rut_empresa', 'razon_social',
-                    'tipo_tecnologia_nombre', 'potencia_nominal', 'comuna_id', 'comuna',
-                    'provincia_id', 'provincia', 'region_id', 'region', 'lat', 'lng',
-                    'nombre_se', 'nivel_tension', 'seccion_barra_conexion', 'pano_conexion',
-                    'fecha_estimada_conexion', 'calificacion_id', 'calificacion_nombre',
-                    'etapa_id', 'etapa', 'nup', 'cup', 'deleted_at', 'cancelled_at'
-                ]
-
-                nuevas = []
-                actualizadas = []
-
-                for sol in solicitudes:
-                    sol_id = sol['id']
-
-                    if sol_id not in existing:
-                        # Nueva solicitud
-                        nuevas.append(sol)
-                    else:
-                        # Verificar si hay cambios reales
-                        old = existing[sol_id]
-                        has_changes = False
-
-                        for field in compare_fields:
-                            old_val = old.get(field)
-                            new_val = sol.get(field)
-
-                            # Normalizar para comparación
-                            if old_val is not None and hasattr(old_val, 'strftime'):
-                                old_val = old_val.strftime('%Y-%m-%d %H:%M:%S') if hasattr(old_val, 'hour') else old_val.strftime('%Y-%m-%d')
-
-                            if str(old_val) != str(new_val):
-                                has_changes = True
-                                break
-
-                        if has_changes:
-                            actualizadas.append(sol)
-                        else:
-                            result["sin_cambios"] += 1
+                # Clasificar solicitudes usando el método compartido
+                classified = self._classify_solicitudes(solicitudes, existing)
+                nuevas = classified['nuevas']
+                actualizadas = classified['actualizadas']
+                result["sin_cambios"] = len(classified['sin_cambios'])
 
                 # INSERT nuevas
                 if nuevas:
                     insert_sql = """
                     INSERT INTO solicitudes (
                         id, tipo_solicitud_id, tipo_solicitud, estado_solicitud_id, estado_solicitud,
-                        create_date, update_date, proyecto_id, proyecto, rut_empresa, razon_social,
+                        create_date, api_update_date, proyecto_id, proyecto, rut_empresa, razon_social,
                         tipo_tecnologia_nombre, potencia_nominal,
                         comuna_id, comuna, provincia_id, provincia, region_id, region, lat, lng,
                         nombre_se, nivel_tension, seccion_barra_conexion, pano_conexion, fecha_estimada_conexion,
                         calificacion_id, calificacion_nombre, etapa_id, etapa, nup, cup,
-                        deleted_at, cancelled_at, fetched_at, last_pipeline_run_id
+                        deleted_at, cancelled_at, created_at
                     ) VALUES (
                         %(id)s, %(tipo_solicitud_id)s, %(tipo_solicitud)s, %(estado_solicitud_id)s, %(estado_solicitud)s,
-                        %(create_date)s, %(update_date)s, %(proyecto_id)s, %(proyecto)s, %(rut_empresa)s, %(razon_social)s,
+                        %(create_date)s, %(api_update_date)s, %(proyecto_id)s, %(proyecto)s, %(rut_empresa)s, %(razon_social)s,
                         %(tipo_tecnologia_nombre)s, %(potencia_nominal)s,
                         %(comuna_id)s, %(comuna)s, %(provincia_id)s, %(provincia)s, %(region_id)s, %(region)s, %(lat)s, %(lng)s,
                         %(nombre_se)s, %(nivel_tension)s, %(seccion_barra_conexion)s, %(pano_conexion)s, %(fecha_estimada_conexion)s,
                         %(calificacion_id)s, %(calificacion_nombre)s, %(etapa_id)s, %(etapa)s, %(nup)s, %(cup)s,
-                        %(deleted_at)s, %(cancelled_at)s, NOW(), %(pipeline_run_id)s
+                        %(deleted_at)s, %(cancelled_at)s, NOW()
                     )
                     """
-                    for sol in nuevas:
-                        sol['pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(insert_sql, nuevas)
                     result["nuevas"] = len(nuevas)
 
@@ -262,7 +367,7 @@ class CENDatabaseManager:
                         tipo_solicitud = %(tipo_solicitud)s,
                         estado_solicitud_id = %(estado_solicitud_id)s,
                         estado_solicitud = %(estado_solicitud)s,
-                        update_date = %(update_date)s,
+                        api_update_date = %(api_update_date)s,
                         proyecto_id = %(proyecto_id)s,
                         proyecto = %(proyecto)s,
                         rut_empresa = %(rut_empresa)s,
@@ -290,14 +395,15 @@ class CENDatabaseManager:
                         cup = %(cup)s,
                         deleted_at = %(deleted_at)s,
                         cancelled_at = %(cancelled_at)s,
-                        updated_at = NOW(),
-                        last_pipeline_run_id = %(pipeline_run_id)s
+                        updated_at = NOW()
                     WHERE id = %(id)s
                     """
-                    for sol in actualizadas:
-                        sol['pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(update_sql, actualizadas)
                     result["actualizadas"] = len(actualizadas)
+
+                # Registrar historial
+                self._record_solicitudes_history(cursor, nuevas, "INSERT", pipeline_run_id)
+                self._record_solicitudes_history(cursor, actualizadas, "UPDATE", pipeline_run_id)
 
                 conn.commit()
 
@@ -311,6 +417,75 @@ class CENDatabaseManager:
         except Error as e:
             logger.error(f"❌ Error en UPSERT de solicitudes: {e}", exc_info=True)
             raise
+
+    def _record_solicitudes_history(
+        self,
+        cursor,
+        solicitudes: List[Dict[str, Any]],
+        operation: str,
+        pipeline_run_id: int | None = None
+    ) -> None:
+        """
+        Registrar cambios en la tabla de historial de solicitudes.
+
+        Args:
+            cursor: Cursor de MySQL activo
+            solicitudes: Lista de solicitudes insertadas o actualizadas
+            operation: 'INSERT' o 'UPDATE'
+            pipeline_run_id: ID del pipeline run actual
+        """
+        if not solicitudes:
+            return
+
+        # Verificar si la tabla existe
+        try:
+            cursor.execute("SELECT 1 FROM solicitudes_history LIMIT 1")
+            cursor.fetchall()  # Consumir resultado
+        except Exception:
+            logger.debug("Tabla solicitudes_history no existe, omitiendo registro de historial")
+            return
+
+        insert_sql = """
+            INSERT INTO solicitudes_history (
+                solicitud_id, operation, pipeline_run_id, changed_fields,
+                proyecto, razon_social, tipo_solicitud, estado_solicitud,
+                etapa, tipo_tecnologia_nombre, potencia_nominal, region,
+                fecha_estimada_conexion
+            ) VALUES (
+                %(id)s, %(operation)s, %(pipeline_run_id)s, %(changed_fields)s,
+                %(proyecto)s, %(razon_social)s, %(tipo_solicitud)s, %(estado_solicitud)s,
+                %(etapa)s, %(tipo_tecnologia_nombre)s, %(potencia_nominal)s, %(region)s,
+                %(fecha_estimada_conexion)s
+            )
+        """
+
+        history_records = []
+        for s in solicitudes:
+            # Convertir changed_fields a JSON string
+            changed_fields = s.get("_changed_fields")
+            changed_fields_json = json.dumps(changed_fields) if changed_fields else None
+
+            history_records.append({
+                "id": s.get("id"),
+                "operation": operation,
+                "pipeline_run_id": pipeline_run_id,
+                "changed_fields": changed_fields_json,
+                "proyecto": s.get("proyecto"),
+                "razon_social": s.get("razon_social"),
+                "tipo_solicitud": s.get("tipo_solicitud"),
+                "estado_solicitud": s.get("estado_solicitud"),
+                "etapa": s.get("etapa"),
+                "tipo_tecnologia_nombre": s.get("tipo_tecnologia_nombre"),
+                "potencia_nominal": s.get("potencia_nominal"),
+                "region": s.get("region"),
+                "fecha_estimada_conexion": s.get("fecha_estimada_conexion"),
+            })
+
+        try:
+            cursor.executemany(insert_sql, history_records)
+            logger.debug(f"Registrados {len(history_records)} cambios en historial ({operation})")
+        except Exception as e:
+            logger.warning(f"Error registrando historial: {e}")
 
     def get_existing_documento_ids(self) -> set[int]:
         """
@@ -330,40 +505,91 @@ class CENDatabaseManager:
             logger.error(f"Error al obtener IDs de documentos existentes: {e}")
             return set()
 
-    def insert_documentos_bulk(
+    def _normalize_documentos(self, documentos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Normaliza fechas ISO a formato MySQL en documentos."""
+        for documento in documentos:
+            documento['create_date'] = parse_iso_datetime(documento.get('create_date'))
+            # API field 'update_date' maps to our 'api_update_date' column
+            documento['api_update_date'] = parse_iso_datetime(documento.get('update_date'))
+        return documentos
+
+    def _classify_documentos(
         self,
         documentos: List[Dict[str, Any]],
-        pipeline_run_id: Optional[int] = None
-    ) -> Dict[str, int]:
+        existing: Dict[int, Dict[str, Any]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Inserta o actualiza documentos con detección de cambios reales.
+        Clasifica documentos en nuevos, actualizados, y sin cambios.
 
-        Estrategia inteligente:
-        - Si el registro no existe → INSERT (nuevo)
-        - Si existe y algún campo cambió → UPDATE (actualizado)
-        - Si existe y nada cambió → no hace nada (sin cambios)
+        Returns:
+            Dict con listas: {"nuevos": [...], "actualizados": [...], "sin_cambios": [...]}
+        """
+        nuevos = []
+        actualizados = []
+        sin_cambios = []
 
-        Nota: NO actualiza campos de descarga local (downloaded, local_path, etc.)
+        for doc in documentos:
+            doc_id = doc['id']
+
+            if doc_id not in existing:
+                nuevos.append(doc)
+            else:
+                old = existing[doc_id]
+                has_changes = False
+                changed_fields = []
+
+                for field in self.DOCUMENTO_COMPARE_FIELDS:
+                    old_val = old.get(field)
+                    new_val = doc.get(field)
+
+                    if old_val is not None and hasattr(old_val, 'strftime'):
+                        old_val = old_val.strftime('%Y-%m-%d %H:%M:%S')
+
+                    if str(old_val) != str(new_val):
+                        has_changes = True
+                        changed_fields.append({
+                            'field': field,
+                            'old': old_val,
+                            'new': new_val
+                        })
+
+                if has_changes:
+                    doc['_changed_fields'] = changed_fields
+                    actualizados.append(doc)
+                else:
+                    sin_cambios.append(doc)
+
+        return {"nuevos": nuevos, "actualizados": actualizados, "sin_cambios": sin_cambios}
+
+    def preview_documentos_bulk(
+        self,
+        documentos: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Previsualiza qué documentos serían insertados/actualizados sin escribir a la BD.
 
         Args:
             documentos: Lista de diccionarios con datos de documentos
-            pipeline_run_id: ID del pipeline_run actual (opcional)
 
         Returns:
-            Dict con conteos: {"nuevos": N, "actualizados": N, "sin_cambios": N}
+            Dict con listas detalladas:
+            {
+                "nuevos": [lista de documentos nuevos],
+                "actualizados": [lista de documentos con cambios, incluye _changed_fields],
+                "sin_cambios": [lista de documentos sin cambios],
+                "counts": {"nuevos": N, "actualizados": N, "sin_cambios": N}
+            }
         """
-        result = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
-
         if not documentos:
-            logger.info("No hay documentos para insertar")
-            return result
+            return {
+                "nuevos": [], "actualizados": [], "sin_cambios": [],
+                "counts": {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+            }
 
-        logger.info(f"📥 Procesando {len(documentos)} documentos (UPSERT inteligente)...")
+        logger.info(f"🔍 [PREVIEW] Analizando {len(documentos)} documentos...")
 
-        # Normalizar fechas ISO a formato MySQL
-        for documento in documentos:
-            documento['create_date'] = parse_iso_datetime(documento.get('create_date'))
-            documento['update_date'] = parse_iso_datetime(documento.get('update_date'))
+        # Normalizar fechas
+        documentos = self._normalize_documentos(documentos)
 
         try:
             with self.connection() as conn:
@@ -381,59 +607,96 @@ class CENDatabaseManager:
                 else:
                     existing = {}
 
-                # Campos a comparar (excluyendo campos de descarga local)
-                compare_fields = [
-                    'solicitud_id', 'nombre', 'ruta_s3', 'tipo_documento_id', 'tipo_documento',
-                    'empresa_id', 'razon_social', 'update_date', 'estado_solicitud_id',
-                    'etapa_id', 'etapa', 'version_id', 'visible', 'deleted'
-                ]
+                # Clasificar
+                classified = self._classify_documentos(documentos, existing)
 
-                nuevos = []
-                actualizados = []
+                logger.info(
+                    f"🔍 [PREVIEW] Documentos: {len(classified['nuevos'])} nuevos, "
+                    f"{len(classified['actualizados'])} actualizados, "
+                    f"{len(classified['sin_cambios'])} sin cambios"
+                )
 
-                for doc in documentos:
-                    doc_id = doc['id']
+                return {
+                    **classified,
+                    "counts": {
+                        "nuevos": len(classified['nuevos']),
+                        "actualizados": len(classified['actualizados']),
+                        "sin_cambios": len(classified['sin_cambios'])
+                    }
+                }
 
-                    if doc_id not in existing:
-                        nuevos.append(doc)
-                    else:
-                        # Verificar cambios reales
-                        old = existing[doc_id]
-                        has_changes = False
+        except Error as e:
+            logger.error(f"❌ Error en preview de documentos: {e}", exc_info=True)
+            raise
 
-                        for field in compare_fields:
-                            old_val = old.get(field)
-                            new_val = doc.get(field)
+    def insert_documentos_bulk(
+        self,
+        documentos: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """
+        Inserta o actualiza documentos con detección de cambios reales.
 
-                            if old_val is not None and hasattr(old_val, 'strftime'):
-                                old_val = old_val.strftime('%Y-%m-%d %H:%M:%S')
+        Estrategia inteligente:
+        - Si el registro no existe → INSERT (nuevo)
+        - Si existe y algún campo cambió → UPDATE (actualizado)
+        - Si existe y nada cambió → no hace nada (sin cambios)
 
-                            if str(old_val) != str(new_val):
-                                has_changes = True
-                                break
+        Nota: NO actualiza campos de descarga local (downloaded, local_path, etc.)
 
-                        if has_changes:
-                            actualizados.append(doc)
-                        else:
-                            result["sin_cambios"] += 1
+        Args:
+            documentos: Lista de diccionarios con datos de documentos
+
+        Returns:
+            Dict con conteos: {"nuevos": N, "actualizados": N, "sin_cambios": N}
+        """
+        result = {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+
+        if not documentos:
+            logger.info("No hay documentos para insertar")
+            return result
+
+        logger.info(f"📥 Procesando {len(documentos)} documentos (UPSERT inteligente)...")
+
+        # Normalizar fechas ISO a formato MySQL
+        documentos = self._normalize_documentos(documentos)
+
+        try:
+            with self.connection() as conn:
+                cursor = conn.cursor(dictionary=True)
+
+                # Obtener documentos existentes
+                existing_ids = {d['id'] for d in documentos}
+                if existing_ids:
+                    format_strings = ','.join(['%s'] * len(existing_ids))
+                    cursor.execute(
+                        f"SELECT * FROM documentos WHERE id IN ({format_strings})",
+                        tuple(existing_ids)
+                    )
+                    existing = {row['id']: row for row in cursor.fetchall()}
+                else:
+                    existing = {}
+
+                # Clasificar documentos usando el método compartido
+                classified = self._classify_documentos(documentos, existing)
+                nuevos = classified['nuevos']
+                actualizados = classified['actualizados']
+                result["sin_cambios"] = len(classified['sin_cambios'])
 
                 # INSERT nuevos
                 if nuevos:
                     insert_sql = """
                     INSERT INTO documentos (
                         id, solicitud_id, nombre, ruta_s3, tipo_documento_id, tipo_documento,
-                        empresa_id, razon_social, create_date, update_date,
+                        empresa_id, razon_social, create_date, api_update_date,
                         estado_solicitud_id, etapa_id, etapa, version_id, visible, deleted,
-                        fetched_at, last_pipeline_run_id
+                        created_at
                     ) VALUES (
                         %(id)s, %(solicitud_id)s, %(nombre)s, %(ruta_s3)s, %(tipo_documento_id)s, %(tipo_documento)s,
-                        %(empresa_id)s, %(razon_social)s, %(create_date)s, %(update_date)s,
+                        %(empresa_id)s, %(razon_social)s, %(create_date)s, %(api_update_date)s,
                         %(estado_solicitud_id)s, %(etapa_id)s, %(etapa)s, %(version_id)s, %(visible)s, %(deleted)s,
-                        NOW(), %(pipeline_run_id)s
+                        NOW()
                     )
                     """
-                    for doc in nuevos:
-                        doc['pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(insert_sql, nuevos)
                     result["nuevos"] = len(nuevos)
 
@@ -448,19 +711,16 @@ class CENDatabaseManager:
                         tipo_documento = %(tipo_documento)s,
                         empresa_id = %(empresa_id)s,
                         razon_social = %(razon_social)s,
-                        update_date = %(update_date)s,
+                        api_update_date = %(api_update_date)s,
                         estado_solicitud_id = %(estado_solicitud_id)s,
                         etapa_id = %(etapa_id)s,
                         etapa = %(etapa)s,
                         version_id = %(version_id)s,
                         visible = %(visible)s,
                         deleted = %(deleted)s,
-                        updated_at = NOW(),
-                        last_pipeline_run_id = %(pipeline_run_id)s
+                        updated_at = NOW()
                     WHERE id = %(id)s
                     """
-                    for doc in actualizados:
-                        doc['pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(update_sql, actualizados)
                     result["actualizados"] = len(actualizados)
 

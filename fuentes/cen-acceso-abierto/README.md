@@ -2,18 +2,18 @@
 
 Sistema completo de extracción, descarga y parsing de solicitudes de conexión eléctrica desde el [CEN (Coordinador Eléctrico Nacional)](https://www.coordinador.cl/) de Chile.
 
-## 🎯 Características
+## Características
 
-- ✅ **Entry point único**: Un solo comando ejecuta todo el pipeline
-- ✅ **Idempotente**: Se puede ejecutar múltiples veces sin duplicar datos
-- ✅ **Incremental**: Solo procesa datos nuevos
-- ✅ **Append-only**: Nunca actualiza ni borra, solo inserta (auditoría completa)
-- ✅ **Detección automática**: Si no hay datos, carga desde 0
-- ✅ **Soporte completo**: SAC, SUCTD, FEHACIENTE (PDFs, XLSX, ZIPs)
-- ✅ **OCR integrado**: Tesseract para PDFs escaneados
-- ✅ **Estadísticas completas**: Reporte detallado al final
+- **Entry point único**: Un solo comando ejecuta todo el pipeline
+- **Idempotente**: Se puede ejecutar múltiples veces sin duplicar datos
+- **Incremental**: Solo procesa datos nuevos o modificados
+- **Detección de cambios**: Compara 32 campos para detectar actualizaciones
+- **Detección automática**: Si no hay datos, carga desde 0
+- **Soporte completo**: SAC, SUCTD, FEHACIENTE (PDFs, XLSX, ZIPs)
+- **OCR integrado**: Tesseract para PDFs escaneados
+- **Estadísticas completas**: Reporte detallado al final
 
-## 📦 Datos Procesados
+## Datos Procesados
 
 | Tipo | Descripción | Documentos |
 |------|-------------|------------|
@@ -23,7 +23,7 @@ Sistema completo de extracción, descarga y parsing de solicitudes de conexión 
 
 **Total:** 2,455 solicitudes de conexión eléctrica con datos estructurados.
 
-## 🚀 Instalación Rápida
+## Instalación Rápida
 
 ### Prerrequisitos
 - Docker y Docker Compose
@@ -47,15 +47,15 @@ docker-compose up -d cen_db
 docker-compose ps
 
 # 5. Ejecutar migraciones
-./deploy.sh
+python db/setup.py --migrate
 ```
 
-## 🎮 Uso del Pipeline
+## Uso del Pipeline
 
 ### Entry Point Único
 
 ```bash
-# ✅ Ejecutar TODO el pipeline (extracción + descarga + parsing)
+# Ejecutar TODO el pipeline (extracción + descarga + parsing)
 python pipeline.py
 
 # Solo extracción (solicitudes + documentos de la API)
@@ -73,8 +73,11 @@ python pipeline.py --tipos SAC
 # Limitar documentos (para testing)
 python pipeline.py --limit 100
 
-# Ver qué se haría sin ejecutar
-python pipeline.py --dry-run
+# Preview: ver qué se insertaría/actualizaría sin escribir a la BD
+python pipeline.py --preview
+
+# Preview con reporte JSON detallado
+python pipeline.py --preview --output reporte.json
 ```
 
 ### Flujo Completo
@@ -100,7 +103,7 @@ El pipeline ejecuta estos pasos automáticamente:
    └── Estadísticas completas
 ```
 
-## 📊 Estructura de la Base de Datos
+## Estructura de la Base de Datos
 
 ```sql
 -- Solicitudes de conexión
@@ -124,13 +127,13 @@ formularios_fehaciente_parsed (razon_social, rut, nombre_proyecto, ...)
 
 Ver schema completo en `docs/DATABASE_SCHEMA.md`
 
-## 🔧 Desarrollo
+## Desarrollo
 
 ### Estructura del Proyecto
 
 ```
 cen-acceso-abierto/
-├── pipeline.py              # ⭐ Entry point único
+├── pipeline.py              # Entry point único
 ├── src/
 │   ├── extractors/         # Extracción desde API
 │   ├── parsers/            # Parsing de PDFs/XLSX
@@ -164,8 +167,11 @@ python pipeline.py
 ### Tests
 
 ```bash
-# Dry-run (ver qué se haría sin ejecutar)
-python pipeline.py --dry-run
+# Preview (ver qué se insertaría/actualizaría sin escribir)
+python pipeline.py --preview
+
+# Preview con reporte JSON
+python pipeline.py --preview -o preview_report.json
 
 # Procesar solo 10 documentos de cada tipo
 python pipeline.py --limit 10
@@ -174,11 +180,11 @@ python pipeline.py --limit 10
 python pipeline.py --tipos SAC --limit 50
 ```
 
-## 🔄 Actualizaciones Periódicas
+## Actualizaciones Periódicas
 
 ```bash
 # Ejecutar cron job diario (ejemplo)
-0 2 * * * cd /path/to/project && docker-compose run --rm cen_app python pipeline.py
+0 2 * * * cd /path/to/project && uv run python pipeline.py
 
 # O ejecutar manualmente cuando haya nuevas solicitudes
 python pipeline.py
@@ -186,7 +192,7 @@ python pipeline.py
 
 El pipeline detecta automáticamente nuevas solicitudes y solo procesa lo que falta.
 
-## 📈 Estadísticas Actuales
+## Estadísticas Actuales
 
 **Última ejecución:** 2025-10-28
 
@@ -200,14 +206,14 @@ El pipeline detecta automáticamente nuevas solicitudes y solo procesa lo que fa
 | Tasa de éxito FEHACIENTE | 79.4% |
 
 **Mejoras recientes:**
-- ✅ Soporte para archivos ZIP (extracción automática)
-- ✅ OCR con Tesseract para PDFs escaneados
-- ✅ Columnas expandidas (RUT, giro, tipo_proyecto)
-- ✅ Extracción progresiva con fallbacks (pdfplumber → pypdf → OCR)
+- Soporte para archivos ZIP (extracción automática)
+- OCR con Tesseract para PDFs escaneados
+- Columnas expandidas (RUT, giro, tipo_proyecto)
+- Extracción progresiva con fallbacks (pdfplumber → pypdf → OCR)
 
-## 🛠️ Solución de Problemas
+## Solución de Problemas
 
-### Database Connection Error
+### Error de Conexión a Base de Datos
 
 ```bash
 # Verificar que la BD está corriendo
@@ -220,11 +226,11 @@ docker-compose logs cen_db
 docker-compose restart cen_db
 ```
 
-### Parsing Errors
+### Errores de Parsing
 
 ```bash
 # Ver errores en la base de datos
-mysql -h 172.29.0.5 -P 3308 -u chris -ppewpew12 cen_acceso_abierto
+mysql -h localhost -P 3308 -u user -p database
 
 SELECT parsing_error, COUNT(*)
 FROM formularios_parseados
@@ -237,35 +243,36 @@ ORDER BY COUNT(*) DESC;
 
 ```bash
 # Ver estado de migraciones
-./deploy.sh --status
+python db/setup.py --status
 
 # Ejecutar migraciones pendientes
-./deploy.sh --migrations
+python db/setup.py --migrate
 
-# Reset completo (⚠️  borra todo)
-./deploy.sh --fresh
+# Reset completo (borra todo)
+python db/setup.py --fresh --drop
 ```
 
-## 📚 Documentación
+## Documentación
 
 - `docs/API_DOCUMENTATION.md` - Endpoints del CEN
 - `docs/DATABASE_SCHEMA.md` - Schema completo de BD
+- `docs/PIPELINE_UPSERT.md` - Lógica de upsert, detección de cambios, y modo preview
 - `docs/parsers/PARSER_V2_CHANGELOG.md` - Evolución de parsers
 - `CLAUDE.md` - Guía para Claude Code
 
-## 🤝 Contribuir
+## Contribuir
 
 1. Fork el repositorio
-2. Crear rama feature (`git checkout -b feature/AmazingFeature`)
-3. Commit cambios (`git commit -m 'Add AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
+2. Crear rama feature (`git checkout -b feature/NuevaCaracteristica`)
+3. Commit cambios (`git commit -m 'Agregar NuevaCaracteristica'`)
+4. Push a la rama (`git push origin feature/NuevaCaracteristica`)
 5. Abrir Pull Request
 
-## 📝 Licencia
+## Licencia
 
 Este proyecto es de código abierto y está disponible bajo la licencia MIT.
 
-## 🙏 Agradecimientos
+## Agradecimientos
 
 - [CEN Chile](https://www.coordinador.cl/) por la API pública
 - Tesseract OCR para extracción de PDFs escaneados
@@ -273,5 +280,5 @@ Este proyecto es de código abierto y está disponible bajo la licencia MIT.
 
 ---
 
-**Última actualización:** 2025-10-28
-**Versión:** 2.5.0
+**Última actualización:** 2025-12-09
+**Versión:** 2.6.0

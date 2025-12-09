@@ -152,6 +152,14 @@ class ProyectosRepository:
         logger.debug(f"Found {len(existing_ids)} existing expediente_ids")
         return existing_ids
 
+    # Campos que se comparan para detectar cambios
+    COMPARE_FIELDS = [
+        "expediente_nombre", "workflow_descripcion", "region_nombre", "comuna_nombre",
+        "tipo_proyecto", "descripcion_tipologia", "razon_ingreso", "titular",
+        "inversion_mm", "estado_proyecto", "encargado", "actividad_actual", "etapa",
+        "fecha_plazo", "dias_legales", "suspendido"
+    ]
+
     def upsert_proyectos_bulk(
         self,
         proyectos: list[dict[str, Any]],
@@ -161,13 +169,13 @@ class ProyectosRepository:
         Insertar o actualizar múltiples proyectos en bulk (UPSERT).
 
         Implementa estrategia upsert:
-        - Proyectos nuevos: se insertan con fetched_at = NOW()
+        - Proyectos nuevos: se insertan con created_at = NOW()
         - Proyectos existentes con cambios: se actualizan con updated_at = NOW()
         - Proyectos existentes sin cambios: no se modifican
 
         Args:
             proyectos: Lista de diccionarios con datos de proyectos parseados
-            pipeline_run_id: ID del pipeline_run actual (para tracking)
+            pipeline_run_id: ID del pipeline run actual (para historial)
 
         Returns:
             Dict con estadísticas: {nuevos, actualizados, sin_cambios, total}
@@ -192,45 +200,23 @@ class ProyectosRepository:
         expediente_ids = list(proyectos_dict.keys())
         existing = self._get_proyectos_by_ids(expediente_ids)
 
-        # Campos que se comparan para detectar cambios
-        compare_fields = [
-            "expediente_nombre", "workflow_descripcion", "region_nombre", "comuna_nombre",
-            "tipo_proyecto", "descripcion_tipologia", "razon_ingreso", "titular",
-            "inversion_mm", "estado_proyecto", "encargado", "actividad_actual", "etapa",
-            "fecha_plazo", "dias_legales", "suspendido"
-        ]
-
-        nuevos = []
-        actualizados = []
-
-        for p in proyectos_unicos:
-            exp_id = p.get("expediente_id")
-            if exp_id not in existing:
-                nuevos.append(p)
-            else:
-                # Comparar campos para detectar cambios
-                old = existing[exp_id]
-                has_changes = False
-                for field in compare_fields:
-                    old_val = old.get(field)
-                    new_val = p.get(field)
-                    if old_val != new_val:
-                        has_changes = True
-                        break
-                if has_changes:
-                    actualizados.append(p)
-                else:
-                    stats["sin_cambios"] += 1
+        # Clasificar proyectos
+        classified = self._classify_proyectos(proyectos_unicos, existing)
+        nuevos = classified["nuevos"]
+        actualizados = classified["actualizados"]
+        stats["sin_cambios"] = len(classified["sin_cambios"])
 
         # Insertar nuevos
         if nuevos:
-            self._insert_proyectos_new(nuevos, pipeline_run_id)
+            self._insert_proyectos_new(nuevos)
+            self._record_history(nuevos, "INSERT", pipeline_run_id)
             stats["nuevos"] = len(nuevos)
             logger.info(f"Insertados {len(nuevos)} proyectos nuevos")
 
         # Actualizar existentes con cambios
         if actualizados:
-            self._update_proyectos_changed(actualizados, pipeline_run_id)
+            self._update_proyectos_changed(actualizados)
+            self._record_history(actualizados, "UPDATE", pipeline_run_id)
             stats["actualizados"] = len(actualizados)
             logger.info(f"Actualizados {len(actualizados)} proyectos con cambios")
 
@@ -239,20 +225,125 @@ class ProyectosRepository:
 
         return stats
 
+    def _classify_proyectos(
+        self,
+        proyectos: list[dict[str, Any]],
+        existing: dict[int, dict]
+    ) -> dict[str, list]:
+        """
+        Clasifica proyectos en nuevos, actualizados, y sin cambios.
+
+        Returns:
+            Dict con listas: {"nuevos": [...], "actualizados": [...], "sin_cambios": [...]}
+        """
+        nuevos = []
+        actualizados = []
+        sin_cambios = []
+
+        for p in proyectos:
+            exp_id = p.get("expediente_id")
+            if exp_id not in existing:
+                nuevos.append(p)
+            else:
+                old = existing[exp_id]
+                has_changes = False
+                changed_fields = []
+
+                for field in self.COMPARE_FIELDS:
+                    old_val = old.get(field)
+                    new_val = p.get(field)
+                    if old_val != new_val:
+                        has_changes = True
+                        changed_fields.append({
+                            "field": field,
+                            "old": old_val,
+                            "new": new_val
+                        })
+
+                if has_changes:
+                    p["_changed_fields"] = changed_fields
+                    actualizados.append(p)
+                else:
+                    sin_cambios.append(p)
+
+        return {"nuevos": nuevos, "actualizados": actualizados, "sin_cambios": sin_cambios}
+
+    def preview_proyectos_bulk(
+        self,
+        proyectos: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """
+        Previsualiza que proyectos serian insertados/actualizados sin escribir a la BD.
+
+        Args:
+            proyectos: Lista de diccionarios con datos de proyectos
+
+        Returns:
+            Dict con listas detalladas:
+            {
+                "nuevos": [lista de proyectos nuevos],
+                "actualizados": [lista de proyectos con cambios, incluye _changed_fields],
+                "sin_cambios": [lista de proyectos sin cambios],
+                "counts": {"nuevos": N, "actualizados": N, "sin_cambios": N}
+            }
+        """
+        if not proyectos:
+            return {
+                "nuevos": [], "actualizados": [], "sin_cambios": [],
+                "counts": {"nuevos": 0, "actualizados": 0, "sin_cambios": 0}
+            }
+
+        logger.info(f"[PREVIEW] Analizando {len(proyectos)} proyectos...")
+
+        # Deduplicar
+        proyectos_dict = {p.get("expediente_id"): p for p in proyectos if p.get("expediente_id")}
+        proyectos_unicos = list(proyectos_dict.values())
+
+        # Obtener existentes
+        expediente_ids = list(proyectos_dict.keys())
+        existing = self._get_proyectos_by_ids(expediente_ids)
+
+        # Clasificar
+        classified = self._classify_proyectos(proyectos_unicos, existing)
+
+        logger.info(
+            f"[PREVIEW] Proyectos: {len(classified['nuevos'])} nuevos, "
+            f"{len(classified['actualizados'])} actualizados, "
+            f"{len(classified['sin_cambios'])} sin cambios"
+        )
+
+        return {
+            **classified,
+            "counts": {
+                "nuevos": len(classified["nuevos"]),
+                "actualizados": len(classified["actualizados"]),
+                "sin_cambios": len(classified["sin_cambios"]),
+                "total": len(proyectos_unicos)
+            }
+        }
+
     def _get_proyectos_by_ids(self, expediente_ids: list[int]) -> dict[int, dict]:
-        """Obtener proyectos existentes por IDs."""
+        """Obtener proyectos existentes por IDs (en batches para evitar límites de MySQL)."""
         if not expediente_ids:
             return {}
 
-        placeholders = ",".join(["%s"] * len(expediente_ids))
-        query = f"SELECT * FROM proyectos WHERE expediente_id IN ({placeholders})"
-        results = self.db.fetch_all(query, params=tuple(expediente_ids), dictionary=True)
-        return {r["expediente_id"]: r for r in results}
+        # Procesar en batches de 1000 para evitar límites de MySQL
+        BATCH_SIZE = 1000
+        all_results = {}
+
+        for i in range(0, len(expediente_ids), BATCH_SIZE):
+            batch_ids = expediente_ids[i:i + BATCH_SIZE]
+            placeholders = ",".join(["%s"] * len(batch_ids))
+            query = f"SELECT * FROM proyectos WHERE expediente_id IN ({placeholders})"
+            results = self.db.fetch_all(query, params=tuple(batch_ids), dictionary=True)
+            for r in results:
+                all_results[r["expediente_id"]] = r
+
+        return all_results
 
     def _insert_proyectos_new(
         self,
-        proyectos: list[dict[str, Any]],
-        pipeline_run_id: int | None = None
+        proyectos: list[dict[str, Any]]
     ) -> None:
         """Insertar proyectos nuevos."""
         query = """
@@ -266,19 +357,18 @@ class ProyectosRepository:
                 estado_proyecto, encargado, actividad_actual, etapa,
                 link_mapa_show, link_mapa_url, link_mapa_image,
                 acciones, dias_legales, suspendido, ver_actividad,
-                fetched_at, last_pipeline_run_id
+                created_at
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
             )
         """
-        params_list = [self._proyecto_to_params(p) + (pipeline_run_id,) for p in proyectos]
+        params_list = [self._proyecto_to_params(p) for p in proyectos]
         self.db.execute_many(query, params_list, commit=True)
 
     def _update_proyectos_changed(
         self,
-        proyectos: list[dict[str, Any]],
-        pipeline_run_id: int | None = None
+        proyectos: list[dict[str, Any]]
     ) -> None:
         """Actualizar proyectos que tienen cambios."""
         query = """
@@ -292,17 +382,79 @@ class ProyectosRepository:
                 estado_proyecto = %s, encargado = %s, actividad_actual = %s, etapa = %s,
                 link_mapa_show = %s, link_mapa_url = %s, link_mapa_image = %s,
                 acciones = %s, dias_legales = %s, suspendido = %s, ver_actividad = %s,
-                updated_at = NOW(),
-                last_pipeline_run_id = %s
+                updated_at = NOW()
             WHERE expediente_id = %s
         """
         params_list = []
         for p in proyectos:
-            # Nota: _proyecto_to_params incluye expediente_id al inicio, lo necesitamos al final para WHERE
             base_params = self._proyecto_to_params_for_update(p)
-            params = base_params + (pipeline_run_id, p.get("expediente_id"))
+            params = base_params + (p.get("expediente_id"),)
             params_list.append(params)
         self.db.execute_many(query, params_list, commit=True)
+
+    def _record_history(
+        self,
+        proyectos: list[dict[str, Any]],
+        operation: str,
+        pipeline_run_id: int | None = None
+    ) -> None:
+        """
+        Registrar cambios en la tabla de historial.
+
+        Args:
+            proyectos: Lista de proyectos insertados o actualizados
+            operation: 'INSERT' o 'UPDATE'
+            pipeline_run_id: ID del pipeline run actual
+        """
+        if not proyectos:
+            return
+
+        # Verificar si la tabla existe (para compatibilidad con BDs sin migrar)
+        try:
+            self.db.fetch_one("SELECT 1 FROM proyectos_history LIMIT 1")
+        except Exception:
+            logger.debug("Tabla proyectos_history no existe, omitiendo registro de historial")
+            return
+
+        query = """
+            INSERT INTO proyectos_history (
+                expediente_id, operation, pipeline_run_id, changed_fields,
+                expediente_nombre, workflow_descripcion, region_nombre,
+                tipo_proyecto, titular, estado_proyecto, actividad_actual,
+                etapa, inversion_mm
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+        """
+
+        params_list = []
+        for p in proyectos:
+            # Convertir changed_fields a JSON string
+            changed_fields = p.get("_changed_fields")
+            changed_fields_json = json.dumps(changed_fields) if changed_fields else None
+
+            params = (
+                p.get("expediente_id"),
+                operation,
+                pipeline_run_id,
+                changed_fields_json,
+                p.get("expediente_nombre"),
+                p.get("workflow_descripcion"),
+                p.get("region_nombre"),
+                p.get("tipo_proyecto"),
+                p.get("titular"),
+                p.get("estado_proyecto"),
+                p.get("actividad_actual"),
+                p.get("etapa"),
+                p.get("inversion_mm"),
+            )
+            params_list.append(params)
+
+        try:
+            self.db.execute_many(query, params_list, commit=True)
+            logger.debug(f"Registrados {len(params_list)} cambios en historial ({operation})")
+        except Exception as e:
+            logger.warning(f"Error registrando historial: {e}")
 
     def _proyecto_to_params_for_update(self, p: dict[str, Any]) -> tuple:
         """Convertir proyecto a tupla de parámetros para UPDATE (sin expediente_id)."""
@@ -493,13 +645,13 @@ class ProyectosRepository:
 
         last_run_time = last_run["started_at"]
 
-        # Proyectos nuevos (fetched_at >= ultima corrida)
+        # Proyectos nuevos (created_at >= ultima corrida)
         nuevos_query = """
             SELECT expediente_id, expediente_nombre, workflow_descripcion,
-                   region_nombre, titular, estado_proyecto, fetched_at
+                   region_nombre, titular, estado_proyecto, created_at
             FROM proyectos
-            WHERE fetched_at >= %s
-            ORDER BY fetched_at DESC
+            WHERE created_at >= %s
+            ORDER BY created_at DESC
         """
         nuevos = self.db.fetch_all(nuevos_query, params=(last_run_time,), dictionary=True)
 
