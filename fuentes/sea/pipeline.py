@@ -30,6 +30,12 @@ USO:
 
     # Limitar paginas (para testing)
     python pipeline.py --max-pages 5
+
+    # Extraer RUTs de todos los PDFs pendientes (full run)
+    python pipeline.py --extract-ruts
+
+    # Extraer RUTs con límite (para testing)
+    python pipeline.py --extract-ruts --rut-limit 50
 """
 
 import argparse
@@ -43,6 +49,7 @@ from typing import Any
 from src.core.database import get_database_manager
 from src.core.http_client import format_duration, get_http_client
 from src.extractors.proyectos import get_async_proyectos_extractor, get_proyectos_extractor
+from src.extractors.rut_extractor import extraer_y_guardar_ruts, get_rut_extractor
 from src.parsers.proyectos import get_proyectos_parser
 from src.repositories.proyectos import get_proyectos_repository
 from src.settings import get_settings
@@ -51,6 +58,7 @@ from src.settings import get_settings
 from src.logging_config import logger
 
 BATCH_SIZE = 10  # Páginas por batch
+RUT_BATCH_SIZE = 50  # PDFs por batch para extracción de RUTs
 
 
 def print_header(text: str) -> None:
@@ -65,6 +73,97 @@ def print_section(text: str) -> None:
     print("\n" + "-" * 80)
     print(f">>> {text}")
     print("-" * 80)
+
+
+def run_rut_extraction(
+    db_manager,
+    expediente_ids: list[int] | None = None,
+    limit: int | None = None
+) -> dict:
+    """
+    Extraer RUTs de PDFs pendientes.
+
+    Args:
+        db_manager: Database manager
+        expediente_ids: Lista de expediente_ids específicos (opcional)
+        limit: Límite de PDFs a procesar (opcional)
+
+    Returns:
+        Dict con estadísticas
+    """
+    print_section("EXTRACCIÓN DE RUTs")
+
+    conn = db_manager.get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    # Query base para PDFs pendientes
+    if expediente_ids:
+        # Solo PDFs de proyectos específicos
+        placeholders = ','.join(['%s'] * len(expediente_ids))
+        query = f"""
+            SELECT rel.id, rel.pdf_url, p.expediente_nombre
+            FROM resumen_ejecutivo_links rel
+            JOIN expediente_documentos ed ON rel.id_documento = ed.id_documento
+            JOIN proyectos p ON ed.expediente_id = p.expediente_id
+            WHERE rel.pdf_url IS NOT NULL
+            AND rel.ruts_extracted_at IS NULL
+            AND p.expediente_id IN ({placeholders})
+        """
+        params = expediente_ids
+    else:
+        # Todos los PDFs pendientes
+        query = """
+            SELECT rel.id, rel.pdf_url, p.expediente_nombre
+            FROM resumen_ejecutivo_links rel
+            JOIN expediente_documentos ed ON rel.id_documento = ed.id_documento
+            JOIN proyectos p ON ed.expediente_id = p.expediente_id
+            WHERE rel.pdf_url IS NOT NULL
+            AND rel.ruts_extracted_at IS NULL
+        """
+        params = []
+
+    if limit:
+        query += f" LIMIT {limit}"
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+
+    if not rows:
+        logger.info("No hay PDFs pendientes para extracción de RUTs")
+        return {"total": 0, "con_ruts": 0, "sin_ruts": 0}
+
+    logger.info(f"Procesando {len(rows)} PDFs para extracción de RUTs...")
+
+    extractor = get_rut_extractor()
+    stats = {"total": 0, "con_ruts": 0, "sin_ruts": 0}
+    t_inicio = time.perf_counter()
+
+    for i, row in enumerate(rows, 1):
+        nombre = row['expediente_nombre'][:50] if row['expediente_nombre'] else 'N/A'
+
+        if i % 10 == 0 or i == len(rows):
+            logger.info(f"  [{i}/{len(rows)}] Procesando...")
+
+        ok = extraer_y_guardar_ruts(row['id'], row['pdf_url'], cursor, extractor)
+        stats["total"] += 1
+        if ok:
+            stats["con_ruts"] += 1
+        else:
+            stats["sin_ruts"] += 1
+
+        # Commit cada RUT_BATCH_SIZE
+        if i % RUT_BATCH_SIZE == 0:
+            conn.commit()
+
+    conn.commit()
+
+    t_total = time.perf_counter() - t_inicio
+    logger.info(
+        f"Extracción de RUTs completada: {stats['con_ruts']}/{stats['total']} "
+        f"con RUTs ({stats['con_ruts']/stats['total']*100:.0f}%) en {t_total:.1f}s"
+    )
+
+    return stats
 
 
 def show_delta_report(repository) -> None:
@@ -459,6 +558,8 @@ Ejemplos:
   python pipeline.py --preview --output preview.json  # Guardar preview en JSON
   python pipeline.py --delta               # Solo mostrar delta desde última corrida
   python pipeline.py --max-pages 5         # Limitar a 5 páginas (testing)
+  python pipeline.py --extract-ruts        # Extraer RUTs de PDFs pendientes
+  python pipeline.py --extract-ruts --rut-limit 100  # Extraer RUTs con límite
         """
     )
 
@@ -486,6 +587,18 @@ Ejemplos:
         help="Límite de páginas a procesar (para testing)"
     )
 
+    arg_parser.add_argument(
+        "--extract-ruts",
+        action="store_true",
+        help="Extraer RUTs de todos los PDFs pendientes (full run)"
+    )
+
+    arg_parser.add_argument(
+        "--rut-limit",
+        type=int,
+        help="Límite de PDFs a procesar para extracción de RUTs"
+    )
+
     args = arg_parser.parse_args()
 
     # Configuración
@@ -505,6 +618,18 @@ Ejemplos:
         # Modo --delta: solo mostrar delta
         if args.delta:
             show_delta_report(repository)
+            return 0
+
+        # Modo --extract-ruts: extraer RUTs de todos los PDFs pendientes
+        if args.extract_ruts:
+            rut_stats = run_rut_extraction(db_manager, limit=args.rut_limit)
+            print_header("EXTRACCIÓN DE RUTs - COMPLETADO")
+            print(f"Total procesados:  {rut_stats['total']}")
+            print(f"Con RUTs:          {rut_stats['con_ruts']}")
+            print(f"Sin RUTs:          {rut_stats['sin_ruts']}")
+            if rut_stats['total'] > 0:
+                print(f"Tasa de éxito:     {rut_stats['con_ruts']/rut_stats['total']*100:.1f}%")
+            db_manager.close_connection()
             return 0
 
         # Verificar tablas

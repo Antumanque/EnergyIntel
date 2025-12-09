@@ -57,6 +57,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+preview_*.json
 
 # Test coverage
 .coverage

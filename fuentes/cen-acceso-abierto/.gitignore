@@ -245,5 +245,6 @@ formularios/*.xls
 test_output/
 tmp/
 temp/
+preview_*.json
 
 .claude
