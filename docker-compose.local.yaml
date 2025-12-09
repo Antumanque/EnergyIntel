@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # MariaDB Generacion - mirrors production server on port 3308
+  generacion:
+    image: docker.io/library/mariadb:10.11
+    container_name: mariadb_generacion_local
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpassword}
+      MARIADB_USER: chris
+      MARIADB_PASSWORD: pewpew12
+    ports:
+      - "127.0.0.1:3308:3306"
+    volumes:
+      - generacion_data:/var/lib/mysql
+      - ./backups:/backups
+    networks:
+      - mariadb_net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Adminer for database management
+  adminer:
+    image: docker.io/library/adminer
+    container_name: adminer_local
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    networks:
+      - mariadb_net
+    depends_on:
+      - generacion
+
+networks:
+  mariadb_net:
+    driver: bridge
+
+volumes:
+  generacion_data:
