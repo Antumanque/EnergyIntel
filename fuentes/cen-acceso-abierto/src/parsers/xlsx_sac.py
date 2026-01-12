@@ -56,7 +56,7 @@ class SACXLSXParser:
         self.logger.info(f"📊 Parseando XLSX SAC: {xlsx_file.name}")
 
         try:
-            # Abrir workbook
+            # Usar openpyxl para todos (los .xls son realmente xlsx mal nombrados)
             wb = openpyxl.load_workbook(xlsx_path, data_only=True)
             sheet = wb.active
 
@@ -71,11 +71,10 @@ class SACXLSXParser:
             wb.close()
 
             self.logger.info(f"✅ Parsing XLSX exitoso: {len(data)} campos extraídos")
-
             return data
 
         except Exception as e:
-            self.logger.error(f"❌ Error parseando XLSX SAC: {e}", exc_info=True)
+            self.logger.error(f"❌ Error parseando XLSX SAC: {e}")
             raise
 
     def _parse_worksheet(self, sheet: Worksheet) -> Dict[str, Any]:

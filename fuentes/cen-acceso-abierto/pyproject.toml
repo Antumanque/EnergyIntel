@@ -18,4 +18,5 @@ dependencies = [
     "pytesseract>=0.3.13",
     "pillow>=11.0.0",
     "pdf2image>=1.17.0",
+    "xlrd",
 ]

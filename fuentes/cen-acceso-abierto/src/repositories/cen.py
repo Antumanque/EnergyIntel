@@ -367,7 +367,11 @@ class CENDatabaseManager:
                         tipo_solicitud = %(tipo_solicitud)s,
                         estado_solicitud_id = %(estado_solicitud_id)s,
                         estado_solicitud = %(estado_solicitud)s,
+<<<<<<< Updated upstream
                         api_update_date = %(api_update_date)s,
+=======
+                        api_update_date = %(update_date)s,
+>>>>>>> Stashed changes
                         proyecto_id = %(proyecto_id)s,
                         proyecto = %(proyecto)s,
                         rut_empresa = %(rut_empresa)s,
@@ -711,7 +715,11 @@ class CENDatabaseManager:
                         tipo_documento = %(tipo_documento)s,
                         empresa_id = %(empresa_id)s,
                         razon_social = %(razon_social)s,
+<<<<<<< Updated upstream
                         api_update_date = %(api_update_date)s,
+=======
+                        api_update_date = %(update_date)s,
+>>>>>>> Stashed changes
                         estado_solicitud_id = %(estado_solicitud_id)s,
                         etapa_id = %(etapa_id)s,
                         etapa = %(etapa)s,
