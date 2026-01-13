@@ -645,13 +645,13 @@ class ProyectosRepository:
 
         last_run_time = last_run["started_at"]
 
-        # Proyectos nuevos (created_at >= ultima corrida)
+        # Proyectos nuevos (fetched_at >= ultima corrida)
         nuevos_query = """
             SELECT expediente_id, expediente_nombre, workflow_descripcion,
-                   region_nombre, titular, estado_proyecto, created_at
+                   region_nombre, titular, estado_proyecto, fetched_at
             FROM proyectos
-            WHERE created_at >= %s
-            ORDER BY created_at DESC
+            WHERE fetched_at >= %s
+            ORDER BY fetched_at DESC
         """
         nuevos = self.db.fetch_all(nuevos_query, params=(last_run_time,), dictionary=True)
 

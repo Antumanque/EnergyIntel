@@ -43,6 +43,7 @@ logs/
 
 # Database
 db/data/
+db/backups/
 *.sql.backup
 
 # Downloads
