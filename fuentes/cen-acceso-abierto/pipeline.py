@@ -106,6 +106,25 @@ class PipelineOrchestrator:
         self._init_db_manager()
         self.pipeline_run_id = self.db_manager.create_pipeline_run()
 
+    def _sync_pipeline_stats(self):
+        """Sincroniza estadísticas actuales a la BD (llamar después de cada step)."""
+        if self.preview or not self.pipeline_run_id:
+            return
+
+        self.db_manager.update_pipeline_run(
+            run_id=self.pipeline_run_id,
+            solicitudes_en_api=self.stats["solicitudes_en_api"],
+            solicitudes_nuevas=self.stats["solicitudes_nuevas"],
+            solicitudes_actualizadas=self.stats["solicitudes_actualizadas"],
+            solicitudes_sin_cambios=self.stats["solicitudes_sin_cambios"],
+            documentos_nuevos=self.stats["documentos_nuevos"],
+            documentos_actualizados=self.stats["documentos_actualizados"],
+            documentos_descargados=self.stats["documentos_descargados"],
+            formularios_parseados_sac=self.stats["formularios_parseados"]["SAC"],
+            formularios_parseados_suctd=self.stats["formularios_parseados"]["SUCTD"],
+            formularios_parseados_fehaciente=self.stats["formularios_parseados"]["FEHACIENTE"],
+        )
+
     def _finish_pipeline_run(self, status: str, error_message: str = None, duration_seconds: int = None):
         """Finaliza el pipeline_run con estadísticas."""
         if self.preview or not self.pipeline_run_id:
@@ -254,7 +273,7 @@ class PipelineOrchestrator:
                 return preview_result["counts"]
 
             # MODO NORMAL: UPSERT inteligente de documentos
-            doc_result = db_manager.insert_documentos_bulk(all_documentos)
+            doc_result = db_manager.insert_documentos_bulk(all_documentos, self.pipeline_run_id)
             self.stats["documentos_nuevos"] = doc_result["nuevos"]
             self.stats["documentos_actualizados"] = doc_result["actualizados"]
             return doc_result
@@ -619,13 +638,17 @@ class PipelineOrchestrator:
             # Paso 1: Extracción de solicitudes + reproceso
             if not kwargs.get('skip_fetch'):
                 self.step_1_fetch_solicitudes()
+                self._sync_pipeline_stats()  # Guardar progreso
                 self.step_2_fetch_documentos()
+                self._sync_pipeline_stats()  # Guardar progreso
                 # Re-extraer documentos de solicitudes sin docs (reproceso)
                 self.step_2b_reextract_documentos_solicitudes_sin_docs()
+                self._sync_pipeline_stats()  # Guardar progreso
 
             # Paso 2: Descarga de documentos (ya incluye reproceso de pendientes)
             if not kwargs.get('skip_download'):
                 self.step_3_download_documents(limit=kwargs.get('limit'))
+                self._sync_pipeline_stats()  # Guardar progreso
 
             # Paso 3: Parsing de formularios (ya incluye reproceso de fallidos)
             if not kwargs.get('skip_parse'):
@@ -633,6 +656,7 @@ class PipelineOrchestrator:
                     tipos=kwargs.get('tipos'),
                     limit=kwargs.get('limit')
                 )
+                self._sync_pipeline_stats()  # Guardar progreso
 
             # Reporte final
             elapsed = (datetime.now() - start_time).total_seconds()

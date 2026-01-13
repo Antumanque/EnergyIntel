@@ -345,7 +345,7 @@ class CENDatabaseManager:
                         comuna_id, comuna, provincia_id, provincia, region_id, region, lat, lng,
                         nombre_se, nivel_tension, seccion_barra_conexion, pano_conexion, fecha_estimada_conexion,
                         calificacion_id, calificacion_nombre, etapa_id, etapa, nup, cup,
-                        deleted_at, cancelled_at, created_at
+                        deleted_at, cancelled_at, last_pipeline_run_id
                     ) VALUES (
                         %(id)s, %(tipo_solicitud_id)s, %(tipo_solicitud)s, %(estado_solicitud_id)s, %(estado_solicitud)s,
                         %(create_date)s, %(api_update_date)s, %(proyecto_id)s, %(proyecto)s, %(rut_empresa)s, %(razon_social)s,
@@ -353,9 +353,12 @@ class CENDatabaseManager:
                         %(comuna_id)s, %(comuna)s, %(provincia_id)s, %(provincia)s, %(region_id)s, %(region)s, %(lat)s, %(lng)s,
                         %(nombre_se)s, %(nivel_tension)s, %(seccion_barra_conexion)s, %(pano_conexion)s, %(fecha_estimada_conexion)s,
                         %(calificacion_id)s, %(calificacion_nombre)s, %(etapa_id)s, %(etapa)s, %(nup)s, %(cup)s,
-                        %(deleted_at)s, %(cancelled_at)s, NOW()
+                        %(deleted_at)s, %(cancelled_at)s, %(last_pipeline_run_id)s
                     )
                     """
+                    # Agregar pipeline_run_id a cada registro
+                    for sol in nuevas:
+                        sol['last_pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(insert_sql, nuevas)
                     result["nuevas"] = len(nuevas)
 
@@ -367,11 +370,7 @@ class CENDatabaseManager:
                         tipo_solicitud = %(tipo_solicitud)s,
                         estado_solicitud_id = %(estado_solicitud_id)s,
                         estado_solicitud = %(estado_solicitud)s,
-<<<<<<< Updated upstream
                         api_update_date = %(api_update_date)s,
-=======
-                        api_update_date = %(update_date)s,
->>>>>>> Stashed changes
                         proyecto_id = %(proyecto_id)s,
                         proyecto = %(proyecto)s,
                         rut_empresa = %(rut_empresa)s,
@@ -399,10 +398,16 @@ class CENDatabaseManager:
                         cup = %(cup)s,
                         deleted_at = %(deleted_at)s,
                         cancelled_at = %(cancelled_at)s,
+                        last_pipeline_run_id = %(last_pipeline_run_id)s,
                         updated_at = NOW()
                     WHERE id = %(id)s
                     """
-                    cursor.executemany(update_sql, actualizadas)
+                    # Strip _changed_fields y agregar pipeline_run_id
+                    actualizadas_clean = [
+                        {**{k: v for k, v in sol.items() if k != '_changed_fields'}, 'last_pipeline_run_id': pipeline_run_id}
+                        for sol in actualizadas
+                    ]
+                    cursor.executemany(update_sql, actualizadas_clean)
                     result["actualizadas"] = len(actualizadas)
 
                 # Registrar historial
@@ -469,6 +474,16 @@ class CENDatabaseManager:
             changed_fields = s.get("_changed_fields")
             changed_fields_json = json.dumps(changed_fields) if changed_fields else None
 
+            # Clean potencia_nominal - API returns quoted strings like '"6.2"'
+            potencia_raw = s.get("potencia_nominal")
+            potencia_clean = None
+            if potencia_raw:
+                try:
+                    # Strip quotes and convert to float
+                    potencia_clean = float(str(potencia_raw).strip('"'))
+                except (ValueError, TypeError):
+                    potencia_clean = None
+
             history_records.append({
                 "id": s.get("id"),
                 "operation": operation,
@@ -480,7 +495,7 @@ class CENDatabaseManager:
                 "estado_solicitud": s.get("estado_solicitud"),
                 "etapa": s.get("etapa"),
                 "tipo_tecnologia_nombre": s.get("tipo_tecnologia_nombre"),
-                "potencia_nominal": s.get("potencia_nominal"),
+                "potencia_nominal": potencia_clean,
                 "region": s.get("region"),
                 "fecha_estimada_conexion": s.get("fecha_estimada_conexion"),
             })
@@ -490,6 +505,71 @@ class CENDatabaseManager:
             logger.debug(f"Registrados {len(history_records)} cambios en historial ({operation})")
         except Exception as e:
             logger.warning(f"Error registrando historial: {e}")
+
+    def _record_documentos_history(
+        self,
+        cursor,
+        documentos: List[Dict[str, Any]],
+        operation: str,
+        pipeline_run_id: int | None = None
+    ) -> None:
+        """
+        Registrar cambios en la tabla de historial de documentos.
+
+        Args:
+            cursor: Cursor de MySQL activo
+            documentos: Lista de documentos insertados o actualizados
+            operation: 'INSERT' o 'UPDATE'
+            pipeline_run_id: ID del pipeline run actual
+        """
+        if not documentos:
+            return
+
+        # Verificar si la tabla existe
+        try:
+            cursor.execute("SELECT 1 FROM documentos_history LIMIT 1")
+            cursor.fetchall()  # Consumir resultado
+        except Exception:
+            logger.debug("Tabla documentos_history no existe, omitiendo registro de historial")
+            return
+
+        insert_sql = """
+            INSERT INTO documentos_history (
+                documento_id, solicitud_id, operation, pipeline_run_id, changed_fields,
+                nombre, tipo_documento, razon_social, etapa, version_id, visible, deleted
+            ) VALUES (
+                %(id)s, %(solicitud_id)s, %(operation)s, %(pipeline_run_id)s, %(changed_fields)s,
+                %(nombre)s, %(tipo_documento)s, %(razon_social)s, %(etapa)s,
+                %(version_id)s, %(visible)s, %(deleted)s
+            )
+        """
+
+        history_records = []
+        for d in documentos:
+            # Convertir changed_fields a JSON string
+            changed_fields = d.get("_changed_fields")
+            changed_fields_json = json.dumps(changed_fields) if changed_fields else None
+
+            history_records.append({
+                "id": d.get("id"),
+                "solicitud_id": d.get("solicitud_id"),
+                "operation": operation,
+                "pipeline_run_id": pipeline_run_id,
+                "changed_fields": changed_fields_json,
+                "nombre": d.get("nombre"),
+                "tipo_documento": d.get("tipo_documento"),
+                "razon_social": d.get("razon_social"),
+                "etapa": d.get("etapa"),
+                "version_id": d.get("version_id"),
+                "visible": d.get("visible"),
+                "deleted": d.get("deleted"),
+            })
+
+        try:
+            cursor.executemany(insert_sql, history_records)
+            logger.debug(f"Registrados {len(history_records)} cambios en historial documentos ({operation})")
+        except Exception as e:
+            logger.warning(f"Error registrando historial documentos: {e}")
 
     def get_existing_documento_ids(self) -> set[int]:
         """
@@ -635,7 +715,8 @@ class CENDatabaseManager:
 
     def insert_documentos_bulk(
         self,
-        documentos: List[Dict[str, Any]]
+        documentos: List[Dict[str, Any]],
+        pipeline_run_id: int | None = None
     ) -> Dict[str, int]:
         """
         Inserta o actualiza documentos con detección de cambios reales.
@@ -649,6 +730,7 @@ class CENDatabaseManager:
 
         Args:
             documentos: Lista de diccionarios con datos de documentos
+            pipeline_run_id: ID del pipeline run para tracking
 
         Returns:
             Dict con conteos: {"nuevos": N, "actualizados": N, "sin_cambios": N}
@@ -693,14 +775,17 @@ class CENDatabaseManager:
                         id, solicitud_id, nombre, ruta_s3, tipo_documento_id, tipo_documento,
                         empresa_id, razon_social, create_date, api_update_date,
                         estado_solicitud_id, etapa_id, etapa, version_id, visible, deleted,
-                        created_at
+                        last_pipeline_run_id
                     ) VALUES (
                         %(id)s, %(solicitud_id)s, %(nombre)s, %(ruta_s3)s, %(tipo_documento_id)s, %(tipo_documento)s,
                         %(empresa_id)s, %(razon_social)s, %(create_date)s, %(api_update_date)s,
                         %(estado_solicitud_id)s, %(etapa_id)s, %(etapa)s, %(version_id)s, %(visible)s, %(deleted)s,
-                        NOW()
+                        %(last_pipeline_run_id)s
                     )
                     """
+                    # Agregar pipeline_run_id a cada registro
+                    for doc in nuevos:
+                        doc['last_pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(insert_sql, nuevos)
                     result["nuevos"] = len(nuevos)
 
@@ -715,22 +800,26 @@ class CENDatabaseManager:
                         tipo_documento = %(tipo_documento)s,
                         empresa_id = %(empresa_id)s,
                         razon_social = %(razon_social)s,
-<<<<<<< Updated upstream
                         api_update_date = %(api_update_date)s,
-=======
-                        api_update_date = %(update_date)s,
->>>>>>> Stashed changes
                         estado_solicitud_id = %(estado_solicitud_id)s,
                         etapa_id = %(etapa_id)s,
                         etapa = %(etapa)s,
                         version_id = %(version_id)s,
                         visible = %(visible)s,
                         deleted = %(deleted)s,
+                        last_pipeline_run_id = %(last_pipeline_run_id)s,
                         updated_at = NOW()
                     WHERE id = %(id)s
                     """
+                    # Agregar pipeline_run_id a cada registro
+                    for doc in actualizados:
+                        doc['last_pipeline_run_id'] = pipeline_run_id
                     cursor.executemany(update_sql, actualizados)
                     result["actualizados"] = len(actualizados)
+
+                # Registrar historial
+                self._record_documentos_history(cursor, nuevos, "INSERT", pipeline_run_id)
+                self._record_documentos_history(cursor, actualizados, "UPDATE", pipeline_run_id)
 
                 conn.commit()
 
